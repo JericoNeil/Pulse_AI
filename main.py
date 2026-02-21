@@ -159,7 +159,6 @@ def _plotly_dark():
     return dict(
         plot_bgcolor="#0d1117", paper_bgcolor="#0d1117",
         font=dict(color="#8b949e", family="Inter"),
-        margin=dict(l=10, r=10, t=30, b=10),
     )
 
 
@@ -263,22 +262,28 @@ if run_button:
                 history = analyze_quarters(ticker_input, n=4)
                 st.write(f"✅ Historical analysis complete — {len(history)} quarters processed")
 
-                st.write("📄 Generating PDF report…")
-                pdf_bytes = generate_pdf_report(ticker_input, stock_data, sentiment, history)
-
+                # Save core results BEFORE PDF (so they're available even if PDF fails)
                 st.session_state.stock      = stock_data
                 st.session_state.sentiment  = sentiment
                 st.session_state.meta       = filing
                 st.session_state.transcript = filing["text"]
                 st.session_state.history    = history
                 st.session_state.keywords   = keywords
-                st.session_state.pdf_bytes  = pdf_bytes
+
+                st.write("📄 Generating PDF report…")
+                try:
+                    pdf_bytes = generate_pdf_report(ticker_input, stock_data, sentiment, history)
+                    st.session_state.pdf_bytes = pdf_bytes
+                    st.write("✅ PDF report ready — download from sidebar")
+                except Exception as pdf_err:
+                    st.session_state.pdf_bytes = None
+                    st.write(f"⚠️ PDF generation skipped: {str(pdf_err)[:120]}")
 
                 status.update(
                     label=f"✅ Analysis complete for **{ticker_input}**",
                     state="complete", expanded=False
                 )
-            except RuntimeError as err:
+            except Exception as err:
                 status.update(label="❌ Analysis failed", state="error", expanded=True)
                 st.error(str(err))
 
@@ -527,8 +532,8 @@ if st.session_state.sentiment and st.session_state.stock:
                 fig_tm.update_layout(
                     **_plotly_dark(),
                     title=dict(text="Top Keywords (by frequency)", font=dict(color="#e6edf3", size=13)),
-                    margin=dict(l=0, r=0, t=35, b=0),
                 )
+                fig_tm.layout.margin.update(l=0, r=0, t=35, b=0)
                 st.plotly_chart(fig_tm, use_container_width=True)
 
         # Positive vs Negative keyword comparison bar
@@ -570,20 +575,34 @@ if st.session_state.sentiment and st.session_state.stock:
         if not history:
             st.info("Historical data not available. Run the analysis to load 4-quarter history.")
         else:
-            qlabels = [r.get("quarter_label", r["date"]) for r in history]
+            dates   = [r["date"] for r in history]
             scores  = [r["vibe_score"] for r in history]
             tones   = [r["tone"].title() for r in history]
             colors  = [_score_color(s) for s in scores]
 
-            # Sentiment Score bar chart w/ quarter labels
+            # Make quarter labels unique: if two filings fall in the same quarter,
+            # append the filing date so each bar has a distinct label
+            raw_labels = [r.get("quarter_label", r["date"]) for r in history]
+            from collections import Counter
+            label_counts = Counter(raw_labels)
+            seen = {}
+            qlabels = []
+            for ql, d in zip(raw_labels, dates):
+                if label_counts[ql] > 1:
+                    seen[ql] = seen.get(ql, 0) + 1
+                    qlabels.append(f"{ql} ({d})")
+                else:
+                    qlabels.append(ql)
+
+            # Sentiment Score bar chart — dates as X, quarter labels as tick text
             fig_hist = go.Figure()
             fig_hist.add_trace(go.Bar(
-                x=qlabels, y=scores,
+                x=dates, y=scores,
                 marker_color=colors,
                 text=[f"{s:+.3f}" for s in scores],
                 textposition="outside",
                 textfont=dict(color="#e6edf3", size=11),
-                hovertemplate="<b>%{x}</b><br>Sentiment Score: %{y:+.3f}<extra></extra>",
+                hovertemplate="<b>%{text}</b><br>Sentiment Score: %{y:+.3f}<extra></extra>",
                 name="Sentiment Score",
             ))
             fig_hist.add_hline(y=0,    line_color="#484f58", line_dash="dash", line_width=1)
@@ -593,18 +612,19 @@ if st.session_state.sentiment and st.session_state.stock:
                 **_plotly_dark(),
                 title=dict(text="Sentiment Score - Last 4 Quarters", font=dict(color="#e6edf3", size=14)),
                 yaxis=dict(title="Sentiment Score", range=[-1.1, 1.1], zeroline=False, gridcolor="#21262d"),
-                xaxis=dict(title="Quarter"),
+                xaxis=dict(title="Quarter", tickvals=dates, ticktext=qlabels),
                 showlegend=False,
             )
             st.plotly_chart(fig_hist, use_container_width=True)
 
-            # Line trend w/ quarter labels
+            # Line trend — dates as X, quarter labels as tick text
             fig_line = go.Figure()
             fig_line.add_trace(go.Scatter(
-                x=qlabels, y=scores, mode="lines+markers",
+                x=dates, y=scores, mode="lines+markers",
                 line=dict(color="#58a6ff", width=2),
                 marker=dict(size=9, color=colors, line=dict(color="#0d1117", width=2)),
-                hovertemplate="<b>%{x}</b><br>Sentiment Score: %{y:+.3f}<extra></extra>",
+                hovertemplate="<b>%{text}</b><br>Sentiment Score: %{y:+.3f}<extra></extra>",
+                text=qlabels,
                 name="Sentiment Score",
             ))
             fig_line.add_hline(y=0, line_color="#484f58", line_dash="dash", line_width=1)
@@ -612,7 +632,7 @@ if st.session_state.sentiment and st.session_state.stock:
                 **_plotly_dark(),
                 title=dict(text="Sentiment Trend Over Time", font=dict(color="#e6edf3", size=14)),
                 yaxis=dict(title="Sentiment Score", range=[-1.1, 1.1], gridcolor="#21262d"),
-                xaxis=dict(title="Quarter"),
+                xaxis=dict(title="Quarter", tickvals=dates, ticktext=qlabels),
             )
             st.plotly_chart(fig_line, use_container_width=True)
 
@@ -622,15 +642,15 @@ if st.session_state.sentiment and st.session_state.stock:
             neg_vals = [r["negative_pct"] for r in history]
 
             fig_stack = go.Figure()
-            fig_stack.add_trace(go.Bar(name="Positive", x=qlabels, y=pos_vals, marker_color="#2ea043"))
-            fig_stack.add_trace(go.Bar(name="Neutral",  x=qlabels, y=neu_vals, marker_color="#8b949e"))
-            fig_stack.add_trace(go.Bar(name="Negative", x=qlabels, y=neg_vals, marker_color="#f85149"))
+            fig_stack.add_trace(go.Bar(name="Positive", x=dates, y=pos_vals, marker_color="#2ea043"))
+            fig_stack.add_trace(go.Bar(name="Neutral",  x=dates, y=neu_vals, marker_color="#8b949e"))
+            fig_stack.add_trace(go.Bar(name="Negative", x=dates, y=neg_vals, marker_color="#f85149"))
             fig_stack.update_layout(
                 **_plotly_dark(),
                 barmode="stack",
                 title=dict(text="Sentiment Breakdown per Quarter (%)", font=dict(color="#e6edf3", size=14)),
                 yaxis=dict(title="Percentage", gridcolor="#21262d"),
-                xaxis=dict(title="Quarter"),
+                xaxis=dict(title="Quarter", tickvals=dates, ticktext=qlabels),
                 legend=dict(font=dict(color="#8b949e"), bgcolor="rgba(0,0,0,0)"),
             )
             st.plotly_chart(fig_stack, use_container_width=True)
