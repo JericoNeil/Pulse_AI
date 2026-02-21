@@ -1,0 +1,7 @@
+streamlit
+requests
+huggingface_hub
+python-dotenv
+yfinance
+plotly
+fpdf2
