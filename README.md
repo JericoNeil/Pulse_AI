@@ -63,6 +63,6 @@ Then open **http://localhost:8501** in your browser.
 ├── main.py          # Streamlit UI — 5-tab dashboard
 ├── logic.py         # Data pipeline: SEC EDGAR, yfinance, FinBERT, PDF
 ├── requirements.txt
-├── .env             # Your secrets (not committed to Git)
+├── .env             
 └── README.md
 ```
