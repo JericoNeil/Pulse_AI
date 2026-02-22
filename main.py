@@ -346,6 +346,18 @@ if st.session_state.sentiment and st.session_state.stock:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
+    # ── PDF download (prominent, in main area) ────────────────────────────────
+    if st.session_state.pdf_bytes:
+        dl_col, _ = st.columns([1, 3])
+        with dl_col:
+            st.download_button(
+                label="📥 Download PDF Report",
+                data=st.session_state.pdf_bytes,
+                file_name=f"pulse_ai_{stock['ticker']}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+
     # ── 5 Tabs ────────────────────────────────────────────────────────────────
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📊 Market Overview",
