@@ -6,10 +6,16 @@ main.py - Pulse AI v2
 import plotly.graph_objects as go
 import streamlit as st
 
+import time
+
 from logic import (
     analyze_quarters,
+    check_new_filing,
+    fetch_earnings_calendar,
+    fetch_recent_news,
     fetch_stock_data,
     fetch_transcript,
+    generate_outlook,
     generate_pdf_report,
     get_keyword_insights,
     run_sentiment_analysis,
@@ -166,14 +172,23 @@ def _plotly_dark():
 # ── Session state init ────────────────────────────────────────────────────────
 
 defaults = {
-    "stock":      None,  # stock data
-    "sentiment":  None,  # current quarter sentiment
-    "meta":       None,  # filing metadata
-    "transcript": None,  # full text
-    "history":    None,  # 4-quarter list
-    "keywords":   None,  # keyword insights dict
-    "compare":    None,  # {ticker: {stock, sentiment}} dict
-    "pdf_bytes":  None,
+    "stock":                None,   # stock data
+    "sentiment":            None,   # current quarter sentiment
+    "meta":                 None,   # filing metadata
+    "transcript":           None,   # full text
+    "history":              None,   # 4-quarter list
+    "keywords":             None,   # keyword insights dict
+    "compare":              None,   # {ticker: {stock, sentiment}} dict
+    "pdf_bytes":            None,
+    "primary_ticker":       "",     # last successfully analysed primary ticker
+    # ── New feature state ──────────────────────────────────────────────────
+    "watchlist":            [],     # list of tickers in earnings watchlist
+    "calendar_data":        [],     # [{ticker, earnings_date, days_until, ...}]
+    "last_acc":             {},     # {ticker: acc_number} for change-detection
+    "new_filing_banner":    None,   # {ticker, acc, date} when new filing found
+    "outlook":              None,   # forward-looking outlook dict
+    "news_items":           [],     # [{title, publisher, link, published_date}]
+    "_last_auto_check":     0.0,    # unix timestamp of last auto-check
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -210,6 +225,57 @@ with st.sidebar:
             mime="application/pdf",
             use_container_width=True,
         )
+
+    # ── Earnings Watchlist ────────────────────────────────────────────────────
+    st.divider()
+    st.markdown("""
+    <div style="font-size:.82rem;font-weight:600;color:#e6edf3;margin-bottom:8px">
+      📅 Earnings Watchlist
+    </div>""", unsafe_allow_html=True)
+
+    wl_col1, wl_col2 = st.columns([3, 1])
+    wl_input_val = wl_col1.text_input(
+        "Add ticker", placeholder="e.g. NVDA",
+        label_visibility="collapsed", key="wl_add_input", max_chars=10
+    ).strip().upper()
+    if wl_col2.button("➕", help="Add to watchlist", key="wl_add_btn"):
+        if wl_input_val and wl_input_val not in st.session_state.watchlist:
+            st.session_state.watchlist.append(wl_input_val)
+            st.rerun()
+
+    for wl_t in list(st.session_state.watchlist):
+        rc1, rc2 = st.columns([4, 1])
+        rc1.markdown(
+            f"<span style='color:#e6edf3;font-size:.8rem'>{wl_t}</span>",
+            unsafe_allow_html=True,
+        )
+        if rc2.button("✕", key=f"rm_{wl_t}", help=f"Remove {wl_t}"):
+            st.session_state.watchlist.remove(wl_t)
+            st.session_state.calendar_data = [
+                c for c in st.session_state.calendar_data if c["ticker"] != wl_t
+            ]
+            st.rerun()
+
+    if st.session_state.watchlist:
+        if st.button("📅 Refresh Calendar", use_container_width=True, key="refresh_cal"):
+            st.session_state.calendar_data = fetch_earnings_calendar(st.session_state.watchlist)
+            st.rerun()
+
+    # ── Check for New Filings ─────────────────────────────────────────────────
+    st.divider()
+    if st.button("🔔 Check for New Filings", use_container_width=True, key="check_filings_btn"):
+        tickers_to_check = list(st.session_state.last_acc.keys())
+        found = None
+        for chk_t in tickers_to_check:
+            result = check_new_filing(chk_t, st.session_state.last_acc.get(chk_t))
+            if result["is_new"]:
+                found = {"ticker": chk_t, "acc": result["acc"], "date": result["date"]}
+                break
+        if found:
+            st.session_state.new_filing_banner = found
+            st.rerun()
+        else:
+            st.toast("No new filings detected.", icon="✅")
 
     st.divider()
     st.markdown("""
@@ -262,17 +328,42 @@ if run_button:
                 history = analyze_quarters(ticker_input, n=4)
                 st.write(f"✅ Historical analysis complete — {len(history)} quarters processed")
 
+                st.write("📰 Fetching recent news…")
+                news_items = fetch_recent_news(ticker_input)
+                st.write(f"✅ {len(news_items)} recent articles found")
+
+                st.write("🔮 Generating forward-looking outlook…")
+                outlook = generate_outlook(ticker_input, sentiment, history, news_items)
+                st.write(
+                    f"✅ Outlook: **{outlook['signal'].title()}** "
+                    f"(composite {outlook['composite_score']:+.2f})"
+                )
+
                 # Save core results BEFORE PDF (so they're available even if PDF fails)
-                st.session_state.stock      = stock_data
-                st.session_state.sentiment  = sentiment
-                st.session_state.meta       = filing
-                st.session_state.transcript = filing["text"]
-                st.session_state.history    = history
-                st.session_state.keywords   = keywords
+                st.session_state.stock          = stock_data
+                st.session_state.sentiment      = sentiment
+                st.session_state.meta           = filing
+                st.session_state.transcript     = filing["text"]
+                st.session_state.history        = history
+                st.session_state.keywords       = keywords
+                st.session_state.news_items     = news_items
+                st.session_state.outlook        = outlook
+                st.session_state.primary_ticker = ticker_input
+
+                # Store accession number for new-filing change-detection
+                acc = filing.get("acc", "")
+                if acc:
+                    st.session_state.last_acc = {
+                        **st.session_state.last_acc,
+                        ticker_input: acc,
+                    }
 
                 st.write("📄 Generating PDF report…")
                 try:
-                    pdf_bytes = generate_pdf_report(ticker_input, stock_data, sentiment, history)
+                    pdf_bytes = generate_pdf_report(
+                        ticker_input, stock_data, sentiment, history,
+                        compare_data=st.session_state.compare or None,
+                    )
                     st.session_state.pdf_bytes = pdf_bytes
                     st.write("✅ PDF report ready — download from sidebar")
                 except Exception as pdf_err:
@@ -312,6 +403,126 @@ if compare_button:
             st.session_state.compare = compare_results
             cstatus.update(label="✅ Comparison complete", state="complete", expanded=False)
 
+    # Regenerate PDF to include the newly compared tickers (if primary analysis exists)
+    _pticker = st.session_state.primary_ticker
+    if st.session_state.stock and st.session_state.sentiment and _pticker:
+        try:
+            st.session_state.pdf_bytes = generate_pdf_report(
+                _pticker,
+                st.session_state.stock,
+                st.session_state.sentiment,
+                st.session_state.history or [],
+                compare_data=st.session_state.compare or None,
+            )
+        except Exception as _pdf_err:
+            st.warning(f"⚠️ PDF update failed: {str(_pdf_err)[:200]}")
+
+
+# ── Auto-trigger: near-earnings new-filing check ──────────────────────────────
+# Runs at most once every 30 min per session; only when a ticker is near its
+# earnings date AND we have a previous accession number to compare against.
+
+_auto_check_interval = 30 * 60  # seconds
+if (
+    ticker_input
+    and ticker_input in st.session_state.last_acc
+    and time.time() - st.session_state["_last_auto_check"] > _auto_check_interval
+):
+    cal_entry = next(
+        (c for c in st.session_state.calendar_data if c["ticker"] == ticker_input),
+        None,
+    )
+    near_earnings = (
+        cal_entry is not None
+        and cal_entry["days_until"] is not None
+        and abs(cal_entry["days_until"]) <= 2
+    )
+    if near_earnings:
+        st.session_state["_last_auto_check"] = time.time()
+        result = check_new_filing(ticker_input, st.session_state.last_acc[ticker_input])
+        if result["is_new"]:
+            st.session_state.new_filing_banner = {
+                "ticker": ticker_input,
+                "acc":    result["acc"],
+                "date":   result["date"],
+            }
+
+# ── New-filing notification banner ────────────────────────────────────────────
+
+if st.session_state.new_filing_banner:
+    b = st.session_state.new_filing_banner
+    col_banner, col_dismiss = st.columns([5, 1])
+    with col_banner:
+        st.info(
+            f"📣 **New 8-K filing detected for {b['ticker']}** (filed {b['date']}) — "
+            "a fresh earnings release is available. Run analysis to update your dashboard."
+        )
+    with col_dismiss:
+        if st.button("Dismiss", key="dismiss_banner"):
+            st.session_state.new_filing_banner = None
+            st.rerun()
+
+# ── Earnings Calendar section (always visible when watchlist is non-empty) ────
+
+if st.session_state.watchlist:
+    # Refresh calendar data if stale (empty but watchlist has tickers)
+    if not st.session_state.calendar_data:
+        st.session_state.calendar_data = fetch_earnings_calendar(st.session_state.watchlist)
+
+    with st.expander("📅 Earnings Calendar", expanded=True):
+        cal_data = st.session_state.calendar_data
+        if not cal_data:
+            st.info("No calendar data available. Click **Refresh Calendar** in the sidebar.")
+        else:
+            today_dt = __import__("datetime").date.today()
+
+            def _days_badge(days):
+                if days is None:
+                    return "<span style='color:#484f58'>—</span>"
+                if days == 0:
+                    return "<span style='color:#f85149;font-weight:700'>TODAY</span>"
+                if days == 1:
+                    return "<span style='color:#f85149;font-weight:600'>Tomorrow</span>"
+                if days <= 7:
+                    return f"<span style='color:#d29922;font-weight:600'>In {days}d</span>"
+                if days < 0:
+                    return f"<span style='color:#484f58'>{abs(days)}d ago</span>"
+                return f"<span style='color:#2ea043'>In {days}d</span>"
+
+            header_html = """
+            <table style="width:100%;border-collapse:collapse;font-size:.8rem">
+              <thead>
+                <tr style="color:#8b949e;border-bottom:1px solid #21262d">
+                  <th style="text-align:left;padding:6px 8px">Ticker</th>
+                  <th style="text-align:left;padding:6px 8px">Company</th>
+                  <th style="text-align:left;padding:6px 8px">Earnings Date</th>
+                  <th style="text-align:left;padding:6px 8px">Countdown</th>
+                  <th style="text-align:left;padding:6px 8px">EPS Est.</th>
+                  <th style="text-align:left;padding:6px 8px">Rev Est.</th>
+                </tr>
+              </thead><tbody>"""
+            rows_html = ""
+            for c in cal_data:
+                bg = "#161b22" if cal_data.index(c) % 2 == 0 else "#0d1117"
+                rows_html += f"""
+                <tr style="background:{bg};border-bottom:1px solid #21262d21">
+                  <td style="padding:7px 8px;color:#58a6ff;font-weight:600">{c['ticker']}</td>
+                  <td style="padding:7px 8px;color:#e6edf3">{c['company_name']}</td>
+                  <td style="padding:7px 8px;color:#e6edf3">{c['earnings_date']}</td>
+                  <td style="padding:7px 8px">{_days_badge(c['days_until'])}</td>
+                  <td style="padding:7px 8px;color:#8b949e">{c['eps_estimate']}</td>
+                  <td style="padding:7px 8px;color:#8b949e">{c['rev_estimate']}</td>
+                </tr>"""
+            st.markdown(
+                header_html + rows_html + "</tbody></table>",
+                unsafe_allow_html=True,
+            )
+            st.caption(
+                "Calendar data from Yahoo Finance · "
+                "Dates may shift — always verify with official company IR."
+            )
+
+    st.markdown("<br>", unsafe_allow_html=True)
 
 # ── Results layout ────────────────────────────────────────────────────────────
 
@@ -358,13 +569,14 @@ if st.session_state.sentiment and st.session_state.stock:
                 use_container_width=True,
             )
 
-    # ── 5 Tabs ────────────────────────────────────────────────────────────────
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    # ── 6 Tabs ────────────────────────────────────────────────────────────────
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "📊 Market Overview",
         "💬 Earnings Sentiment",
         "📈 Sentiment History",
         "🔄 Ticker Compare",
         "📄 Raw Filing",
+        "🔮 What's Next",
     ])
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -414,7 +626,7 @@ if st.session_state.sentiment and st.session_state.stock:
                 yaxis2=dict(
                     title="Volume", overlaying="y", side="right",
                     showgrid=False, tickformat=".2s",
-                    titlefont=dict(color="#484f58"), tickfont=dict(color="#484f58"),
+                    title_font=dict(color="#484f58"), tickfont=dict(color="#484f58"),
                 ),
                 legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#8b949e")),
                 hovermode="x unified",
@@ -846,6 +1058,151 @@ if st.session_state.sentiment and st.session_state.stock:
             f"Source: SEC EDGAR · Filing: {meta['date']}"
         )
         st.text_area("Transcript", value=transcript, height=520, label_visibility="collapsed")
+
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # TAB 6 — What's Next (Forward-Looking Outlook)
+    # ──────────────────────────────────────────────────────────────────────────
+    with tab6:
+        outlook   = st.session_state.outlook
+        news_data = st.session_state.news_items or []
+
+        # Auto-fetch news if session state is empty but a ticker has been analysed
+        if not news_data and st.session_state.stock:
+            _loaded_ticker = st.session_state.stock["ticker"]
+            with st.spinner(f"Fetching latest news for {_loaded_ticker}…"):
+                try:
+                    _fresh = fetch_recent_news(_loaded_ticker)
+                    if _fresh:
+                        st.session_state.news_items = _fresh
+                        news_data = _fresh
+                except Exception:
+                    pass
+
+        if not outlook:
+            st.info("Run the analysis to generate a forward-looking outlook.")
+        else:
+            sig = outlook["signal"]
+            sig_color = {"bullish": "#2ea043", "bearish": "#f85149", "neutral": "#d29922"}[sig]
+            confidence_pct = round(outlook["confidence"] * 100)
+            composite      = outlook["composite_score"]
+
+            # ── Pulse Prediction hero card ────────────────────────────────────
+            st.markdown(f"""
+            <div style="background:#161b22;border:1px solid {sig_color};border-top:4px solid {sig_color};
+                        border-radius:12px;padding:1.4rem 1.6rem;margin-bottom:20px">
+              <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+                <div style="flex:1;min-width:180px">
+                  <div style="font-size:.72rem;color:#8b949e;margin-bottom:2px">PULSE PREDICTION</div>
+                  <div style="font-size:1.9rem;font-weight:800;color:{sig_color};letter-spacing:.02em">
+                    {sig.upper()}
+                  </div>
+                  <div style="font-size:.8rem;color:#8b949e;margin-top:2px">
+                    Composite signal · {confidence_pct}% model confidence
+                  </div>
+                </div>
+                <div style="text-align:right;min-width:120px">
+                  <div style="font-size:.72rem;color:#8b949e">Composite Score</div>
+                  <div style="font-size:2rem;font-weight:700;color:{sig_color}">{composite:+.2f}</div>
+                  <div style="font-size:.7rem;color:#484f58">range −1.0 to +1.0</div>
+                </div>
+              </div>
+            </div>""", unsafe_allow_html=True)
+
+            # ── Contributing signals ──────────────────────────────────────────
+            st.markdown("""
+            <div style="font-size:.9rem;font-weight:600;color:#e6edf3;margin-bottom:10px">
+              📐 Signal Breakdown
+            </div>""", unsafe_allow_html=True)
+
+            def _dir_badge(d):
+                c = {"bullish": "#2ea043", "bearish": "#f85149", "neutral": "#d29922"}[d]
+                icon = {"bullish": "▲", "bearish": "▼", "neutral": "●"}[d]
+                return f"<span style='color:{c};font-weight:700'>{icon} {d.title()}</span>"
+
+            sig_cols = st.columns(3)
+            for sc, sig_item in zip(sig_cols, outlook["signals"]):
+                d_color = {"bullish": "#2ea04320", "bearish": "#f8514920", "neutral": "#d2992220"}[sig_item["direction"]]
+                d_border = {"bullish": "#2ea043", "bearish": "#f85149", "neutral": "#d29922"}[sig_item["direction"]]
+                with sc:
+                    st.markdown(f"""
+                    <div style="background:#161b22;border:1px solid {d_border}40;
+                                border-left:3px solid {d_border};border-radius:8px;
+                                padding:12px 14px;height:100%">
+                      <div style="font-size:.7rem;color:#8b949e;margin-bottom:2px">
+                        {sig_item['name']} · <span style="color:#484f58">{sig_item['weight']}</span>
+                      </div>
+                      <div style="font-size:.95rem;font-weight:600;color:#e6edf3;margin-bottom:4px">
+                        {sig_item['value']}
+                      </div>
+                      {_dir_badge(sig_item['direction'])}
+                      <div style="font-size:.7rem;color:#484f58;margin-top:4px">{sig_item['detail']}</div>
+                    </div>""", unsafe_allow_html=True)
+
+            # ── Narrative ─────────────────────────────────────────────────────
+            st.markdown("<br>", unsafe_allow_html=True)
+            with st.chat_message("assistant", avatar="🔮"):
+                st.markdown(outlook["summary"])
+            st.caption("⚠️ This is an AI-generated signal for educational purposes only — not financial advice.")
+
+            # ── News sentiment overview ───────────────────────────────────────
+            ns = outlook.get("news_sentiment", {})
+            if ns.get("total", 0) > 0:
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.markdown("""
+                <div style="font-size:.9rem;font-weight:600;color:#e6edf3;margin-bottom:10px">
+                  📰 News Sentiment Snapshot
+                </div>""", unsafe_allow_html=True)
+
+                ns_cols = st.columns(4)
+                ns_cols[0].metric("Overall Score",  f"{ns['score']:+.2f}")
+                ns_cols[1].metric("🟢 Positive",    ns["positive"])
+                ns_cols[2].metric("🔴 Negative",    ns["negative"])
+                ns_cols[3].metric("⚪ Neutral",     ns["neutral"])
+
+                # News sentiment mini bar
+                if ns["total"] > 0:
+                    p_pct = ns["positive"] / ns["total"] * 100
+                    n_pct = ns["negative"] / ns["total"] * 100
+                    e_pct = ns["neutral"]  / ns["total"] * 100
+                    st.markdown(
+                        _bar_html(p_pct, "#2ea043", "🟢 Positive News")
+                        + _bar_html(n_pct, "#f85149", "🔴 Negative News")
+                        + _bar_html(e_pct, "#8b949e", "⚪ Neutral News"),
+                        unsafe_allow_html=True,
+                    )
+
+            # ── Recent news feed ──────────────────────────────────────────────
+            if news_data:
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.markdown(f"""
+                <div style="font-size:.9rem;font-weight:600;color:#e6edf3;margin-bottom:10px">
+                  🗞️ Recent News Feed &nbsp;
+                  <span style="font-size:.75rem;color:#8b949e;font-weight:400">
+                    {len(news_data)} articles · Source: Yahoo Finance
+                  </span>
+                </div>""", unsafe_allow_html=True)
+
+                for art in news_data:
+                    title  = art.get("title", "")
+                    pub    = art.get("publisher", "")
+                    date_s = art.get("published_date", "")
+                    link   = art.get("link", "")
+                    link_html = (
+                        f'<a href="{link}" target="_blank" '
+                        f'style="color:#58a6ff;text-decoration:none;font-size:.85rem;font-weight:500">'
+                        f'{title}</a>'
+                        if link else
+                        f'<span style="color:#e6edf3;font-size:.85rem;font-weight:500">{title}</span>'
+                    )
+                    st.markdown(f"""
+                    <div style="background:#161b22;border:1px solid #21262d;border-radius:8px;
+                                padding:10px 14px;margin-bottom:8px">
+                      {link_html}
+                      <div style="font-size:.72rem;color:#484f58;margin-top:4px">
+                        {pub}&nbsp;·&nbsp;{date_s}
+                      </div>
+                    </div>""", unsafe_allow_html=True)
 
 
 # ── Empty state ───────────────────────────────────────────────────────────────
