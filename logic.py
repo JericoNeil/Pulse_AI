@@ -4,6 +4,7 @@ Data acquisition (SEC EDGAR + yfinance) and FinBERT sentiment pipeline.
 """
 
 import io
+import json
 import os
 import re
 import datetime
@@ -11,14 +12,16 @@ from typing import Optional
 
 import requests
 import yfinance as yf
+import google.generativeai as genai
 from dotenv import load_dotenv
 from fpdf import FPDF
 
 load_dotenv()
 
-HF_TOKEN      = os.getenv("HF_TOKEN")
-FINBERT_MODEL = "ProsusAI/finbert"
-HF_API_URL    = f"https://router.huggingface.co/hf-inference/models/{FINBERT_MODEL}"
+HF_TOKEN       = os.getenv("HF_TOKEN")
+FINBERT_MODEL  = "ProsusAI/finbert"
+HF_API_URL     = f"https://router.huggingface.co/hf-inference/models/{FINBERT_MODEL}"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 EDGAR_HEADERS = {
     "User-Agent": "PulseAI contact@pulseai.com",
@@ -1160,3 +1163,141 @@ def generate_outlook(
         ],
         "news_sentiment": news_sent,
     }
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Ask Pulse — Gemini 1.5 Flash LLM Chatbot
+# ════════════════════════════════════════════════════════════════════════════
+
+PULSE_SYSTEM_PROMPT = """You are Pulse, a concise equity research assistant.
+You answer investor questions ONLY using the structured context provided.
+Rules:
+- Never speculate beyond what the context contains.
+- Always cite specific quarters (e.g. Q3 2024) and paragraph tags (e.g. [P4]) when referencing data.
+- Keep answers brief and factual — suitable for a professional investor audience.
+- Output ONLY valid JSON. No markdown fences, no prose outside the JSON.
+Output schema:
+{
+  "short_summary": "<1-3 sentence direct answer>",
+  "drivers": ["<key driver 1>", "<key driver 2>", "<key driver 3>"],
+  "data_references": ["<e.g. Q3 2024 sentiment: +0.42>", "<e.g. [P7] Revenue grew 12% YoY>"]
+}"""
+
+
+def build_pulse_user_prompt(
+    ticker: str,
+    stock: dict,
+    sentiment: dict,
+    history: list,
+    outlook: dict | None,
+    filing_text: str,
+    user_question: str,
+) -> str:
+    """Build the structured context prompt sent to Gemini."""
+
+    # ── Sentiment history block ──────────────────────────────────────────────
+    hist_lines = []
+    for q in history:
+        hist_lines.append(
+            f"  {q.get('quarter','?')}: score={q.get('score', 0):+.2f}, "
+            f"label={q.get('label','?')}, positive={q.get('positive',0):.0%}, "
+            f"negative={q.get('negative',0):.0%}, neutral={q.get('neutral',0):.0%}"
+        )
+    history_block = "\n".join(hist_lines) if hist_lines else "  (no history available)"
+
+    # ── Most recent sentiment ────────────────────────────────────────────────
+    score    = sentiment.get("score", 0)
+    label    = sentiment.get("label", "unknown")
+    pos      = sentiment.get("positive", 0)
+    neg      = sentiment.get("negative", 0)
+    neu      = sentiment.get("neutral", 0)
+
+    # ── Stock data block ─────────────────────────────────────────────────────
+    price    = stock.get("current_price", "N/A")
+    chg_pct  = stock.get("change_pct", 0)
+    mktcap   = stock.get("market_cap", "N/A")
+    pe       = stock.get("pe_ratio", "N/A")
+    eps      = stock.get("eps", "N/A")
+    rev_g    = stock.get("revenue_growth", "N/A")
+    earn_g   = stock.get("earnings_growth", "N/A")
+
+    # ── Outlook block ────────────────────────────────────────────────────────
+    if outlook:
+        outlook_lines = []
+        for sig in outlook.get("signals", []):
+            outlook_lines.append(
+                f"  {sig['name']}: {sig['value']} ({sig['direction']}, weight {sig['weight']})"
+            )
+        outlook_block = "\n".join(outlook_lines) if outlook_lines else "  (not available)"
+        pulse_score   = outlook.get("pulse_score", "N/A")
+        pulse_label   = outlook.get("pulse_label", "N/A")
+    else:
+        outlook_block = "  (not available)"
+        pulse_score   = "N/A"
+        pulse_label   = "N/A"
+
+    # ── Tag filing paragraphs [P1]–[P20] ────────────────────────────────────
+    paragraphs = [p.strip() for p in filing_text.split("\n\n") if p.strip()][:20]
+    tagged_paras = "\n\n".join(
+        f"[P{i+1}] {p}" for i, p in enumerate(paragraphs)
+    )
+
+    return f"""=== PULSE AI CONTEXT FOR {ticker.upper()} ===
+
+--- LATEST EARNINGS SENTIMENT ---
+Score : {score:+.2f}  |  Label: {label}
+Positive: {pos:.0%}  |  Negative: {neg:.0%}  |  Neutral: {neu:.0%}
+
+--- 4-QUARTER SENTIMENT HISTORY ---
+{history_block}
+
+--- MARKET DATA ---
+Price     : {price}  ({chg_pct:+.2f}% today)
+Market Cap: {mktcap}
+P/E Ratio : {pe}
+EPS       : {eps}
+Revenue Growth  : {rev_g}
+Earnings Growth : {earn_g}
+
+--- PULSE OUTLOOK ---
+Pulse Score : {pulse_score}  |  Label: {pulse_label}
+Signals:
+{outlook_block}
+
+--- LATEST EARNINGS FILING EXCERPTS (tagged) ---
+{tagged_paras}
+
+=== INVESTOR QUESTION ===
+{user_question}"""
+
+
+def call_pulse_llm(user_prompt: str) -> dict:
+    """
+    Send a prompt to Gemini 1.5 Flash and return the parsed JSON response.
+
+    Returns a dict with keys: short_summary, drivers, data_references.
+    Raises ValueError if the API key is missing or the response cannot be parsed.
+    """
+    if not GEMINI_API_KEY:
+        raise ValueError(
+            "GEMINI_API_KEY not set. Add it to your .env file."
+        )
+
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel(
+        model_name="gemini-1.5-flash",
+        system_instruction=PULSE_SYSTEM_PROMPT,
+    )
+
+    response = model.generate_content(user_prompt)
+    raw = response.text.strip()
+
+    # Strip markdown code fences if the model adds them despite instructions
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*\n?", "", raw)
+        raw = re.sub(r"\n?\s*```$", "", raw)
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Gemini returned non-JSON output: {raw[:300]}") from exc
