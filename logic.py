@@ -12,7 +12,7 @@ from typing import Optional
 
 import requests
 import yfinance as yf
-import google.generativeai as genai
+from google import genai
 from dotenv import load_dotenv
 from fpdf import FPDF
 
@@ -1189,7 +1189,7 @@ def build_pulse_user_prompt(
     stock: dict,
     sentiment: dict,
     history: list,
-    outlook: dict | None,
+    outlook: Optional[dict],
     filing_text: str,
     user_question: str,
 ) -> str:
@@ -1213,13 +1213,12 @@ def build_pulse_user_prompt(
     neu      = sentiment.get("neutral", 0)
 
     # ── Stock data block ─────────────────────────────────────────────────────
-    price    = stock.get("current_price", "N/A")
-    chg_pct  = stock.get("change_pct", 0)
+    price    = stock.get("price", "N/A")
+    chg_pct  = stock.get("change_pct", 0) or 0
     mktcap   = stock.get("market_cap", "N/A")
     pe       = stock.get("pe_ratio", "N/A")
-    eps      = stock.get("eps", "N/A")
-    rev_g    = stock.get("revenue_growth", "N/A")
-    earn_g   = stock.get("earnings_growth", "N/A")
+    hi52     = stock.get("week_52_high", "N/A")
+    lo52     = stock.get("week_52_low", "N/A")
 
     # ── Outlook block ────────────────────────────────────────────────────────
     if outlook:
@@ -1255,9 +1254,8 @@ Positive: {pos:.0%}  |  Negative: {neg:.0%}  |  Neutral: {neu:.0%}
 Price     : {price}  ({chg_pct:+.2f}% today)
 Market Cap: {mktcap}
 P/E Ratio : {pe}
-EPS       : {eps}
-Revenue Growth  : {rev_g}
-Earnings Growth : {earn_g}
+52W High  : {hi52}
+52W Low   : {lo52}
 
 --- PULSE OUTLOOK ---
 Pulse Score : {pulse_score}  |  Label: {pulse_label}
@@ -1273,7 +1271,7 @@ Signals:
 
 def call_pulse_llm(user_prompt: str) -> dict:
     """
-    Send a prompt to Gemini 1.5 Flash and return the parsed JSON response.
+    Send a prompt to Gemini 2.0 Flash and return the parsed JSON response.
 
     Returns a dict with keys: short_summary, drivers, data_references.
     Raises ValueError if the API key is missing or the response cannot be parsed.
@@ -1283,13 +1281,16 @@ def call_pulse_llm(user_prompt: str) -> dict:
             "GEMINI_API_KEY not set. Add it to your .env file."
         )
 
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
-        system_instruction=PULSE_SYSTEM_PROMPT,
-    )
+    client = genai.Client(api_key=GEMINI_API_KEY)
 
-    response = model.generate_content(user_prompt)
+    from google.genai import types as genai_types
+    response = client.models.generate_content(
+        model="gemini-1.5-flash",
+        config=genai_types.GenerateContentConfig(
+            system_instruction=PULSE_SYSTEM_PROMPT,
+        ),
+        contents=user_prompt,
+    )
     raw = response.text.strip()
 
     # Strip markdown code fences if the model adds them despite instructions
