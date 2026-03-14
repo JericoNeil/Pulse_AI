@@ -205,6 +205,7 @@ def fetch_last_n_filings(ticker: str, n: int = 4) -> list:
                 "text"   : text,
                 "date"   : date,
                 "quarter": quarter_label,
+                "acc"    : acc_dashes,  # accession number for change-detection
             })
         except Exception:
             continue   # skip filings we can't parse
@@ -220,6 +221,167 @@ def fetch_transcript(ticker: str) -> dict:
     """Fetch the single most-recent earnings release. Wrapper for single-ticker flow."""
     filings = fetch_last_n_filings(ticker, n=1)
     return filings[0]
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Earnings Calendar
+# ════════════════════════════════════════════════════════════════════════════
+
+def _fmt_large_val(n) -> str:
+    if not n:
+        return "N/A"
+    if n >= 1e12:
+        return f"${n/1e12:.2f}T"
+    if n >= 1e9:
+        return f"${n/1e9:.2f}B"
+    if n >= 1e6:
+        return f"${n/1e6:.2f}M"
+    return f"${n:,.0f}"
+
+
+def fetch_earnings_calendar(tickers: list) -> list:
+    """
+    Fetch upcoming earnings dates for a list of tickers via yfinance.
+    Returns list of dicts sorted by days_until, soonest first.
+    """
+    today = datetime.date.today()
+    results = []
+
+    for ticker in tickers:
+        entry = {
+            "ticker":        ticker.upper(),
+            "company_name":  ticker.upper(),
+            "earnings_date": "N/A",
+            "days_until":    None,
+            "eps_estimate":  "N/A",
+            "rev_estimate":  "N/A",
+        }
+        try:
+            tk   = yf.Ticker(ticker)
+            info = tk.info
+            entry["company_name"] = info.get("longName", ticker)
+
+            cal = tk.calendar
+            if isinstance(cal, dict):
+                raw_dates = cal.get("Earnings Date", [])
+                chosen = None
+                # Prefer the first date that is >= today
+                for d in raw_dates:
+                    if hasattr(d, "date"):
+                        d = d.date()
+                    elif isinstance(d, str):
+                        try:
+                            d = datetime.date.fromisoformat(d[:10])
+                        except Exception:
+                            continue
+                    if isinstance(d, datetime.date):
+                        if d >= today:
+                            chosen = d
+                            break
+                        elif chosen is None:
+                            chosen = d   # keep most-recent past date as fallback
+                if chosen:
+                    entry["earnings_date"] = str(chosen)
+                    entry["days_until"]    = (chosen - today).days
+
+                eps = cal.get("Earnings Average") or cal.get("EPS Estimate")
+                rev = cal.get("Revenue Average")  or cal.get("Revenue Estimate")
+                entry["eps_estimate"] = f"${eps:.2f}" if eps else "N/A"
+                entry["rev_estimate"] = _fmt_large_val(rev) if rev else "N/A"
+        except Exception:
+            pass
+
+        results.append(entry)
+
+    results.sort(key=lambda x: (
+        x["days_until"] is None,
+        abs(x["days_until"]) if x["days_until"] is not None else 9999,
+    ))
+    return results
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Recent News
+# ════════════════════════════════════════════════════════════════════════════
+
+def fetch_recent_news(ticker: str, n: int = 8) -> list:
+    """
+    Fetch recent news for a ticker via yfinance.
+    Handles both legacy (pre-0.2.50) and new nested-content formats.
+    Returns list of {title, publisher, link, published_date}.
+    """
+    tk = yf.Ticker(ticker)
+    try:
+        raw = tk.news or []
+    except Exception:
+        return []
+
+    results = []
+    for item in raw[:n]:
+        try:
+            # New yfinance format (0.2.50+): nested under "content"
+            if "content" in item:
+                c         = item["content"]
+                title     = c.get("title", "")
+                publisher = (c.get("provider") or {}).get("displayName", "")
+                link      = (
+                    (c.get("clickThroughUrl") or c.get("canonicalUrl") or {}).get("url", "")
+                )
+                pub_str   = c.get("pubDate", "")
+                pub_date  = pub_str[:10] if pub_str else "N/A"
+            else:
+                # Legacy format
+                pub_time  = item.get("providerPublishTime", 0)
+                pub_date  = (
+                    datetime.datetime.utcfromtimestamp(pub_time).strftime("%Y-%m-%d")
+                    if pub_time else "N/A"
+                )
+                title     = item.get("title", "")
+                publisher = item.get("publisher", "")
+                link      = item.get("link", "")
+
+            if title:
+                results.append({
+                    "title":          title,
+                    "publisher":      publisher,
+                    "link":           link,
+                    "published_date": pub_date,
+                })
+        except Exception:
+            continue
+    return results
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# New Filing Detection  (auto-trigger support)
+# ════════════════════════════════════════════════════════════════════════════
+
+def check_new_filing(ticker: str, last_acc: str = None) -> dict:
+    """
+    Check SEC EDGAR for the latest 8-K for *ticker*.
+    Returns {is_new, acc, date, had_previous}.
+    is_new is True only when last_acc is given AND differs from the newest acc.
+    """
+    try:
+        cik = _get_cik(ticker.upper())
+        sub_url = f"https://data.sec.gov/submissions/CIK{cik}.json"
+        resp = requests.get(sub_url, headers=EDGAR_HEADERS, timeout=15)
+        resp.raise_for_status()
+        recent = resp.json()["filings"]["recent"]
+
+        for form, date, acc in zip(
+            recent["form"], recent["filingDate"], recent["accessionNumber"]
+        ):
+            if form == "8-K":
+                return {
+                    "is_new":        last_acc is not None and acc != last_acc,
+                    "acc":           acc,
+                    "date":          date,
+                    "had_previous":  last_acc is not None,
+                }
+        return {"is_new": False, "acc": None, "date": None, "had_previous": False}
+    except Exception:
+        return {"is_new": False, "acc": None, "date": None, "had_previous": False}
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -468,6 +630,7 @@ def generate_pdf_report(
     stock_data: dict,
     current_sentiment: dict,
     history: list,
+    compare_data: dict = None,
 ) -> bytes:
     """
     Generate a branded PDF report and return as bytes.
@@ -635,6 +798,124 @@ def generate_pdf_report(
 
     pdf.ln(8)
 
+    # ── Multi-Company Comparison ───────────────────────────────────────────────
+    if compare_data:
+        # Build full set: primary ticker + all compared tickers
+        all_companies = {ticker: {"stock": stock_data, "sentiment": current_sentiment}}
+        all_companies.update(compare_data)
+
+        pdf.add_page()
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.set_text_color(13, 17, 23)
+        pdf.cell(0, 7, "MULTI-COMPANY COMPARISON",
+                 new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.set_draw_color(88, 166, 255)
+        pdf.set_line_width(0.6)
+        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+        pdf.ln(5)
+
+        # Comparison summary table
+        col_w   = [30, 50, 28, 34, 22, 22, 22]
+        headers = ["Ticker", "Company", "Price", "Vibe Score", "Pos %", "Neg %", "Neu %"]
+
+        pdf.set_fill_color(22, 27, 34)
+        pdf.set_text_color(230, 237, 243)
+        pdf.set_font("Helvetica", "B", 8)
+        for h, w in zip(headers, col_w):
+            pdf.cell(w, 7, h, fill=True, border=1,
+                     new_x=XPos.RIGHT, new_y=YPos.TOP)
+        pdf.ln(7)
+
+        pdf.set_font("Helvetica", "", 8)
+        for i, (cticker, cdata) in enumerate(all_companies.items()):
+            cstock = cdata.get("stock", {})
+            csent  = cdata.get("sentiment", {})
+            fill   = i % 2 == 0
+            pdf.set_fill_color(240, 242, 245) if fill else pdf.set_fill_color(255, 255, 255)
+            vs     = csent.get("vibe_score", 0)
+            r2, g2, b2 = _score_to_rgb(vs)
+            cprice = cstock.get("price", 0)
+            chg    = cstock.get("change_pct", 0)
+            cname  = cstock.get("company_name", cticker)[:22]  # truncate for cell width
+            vals = [
+                cticker,
+                cname,
+                f"${cprice:,.2f} ({chg:+.1f}%)",
+                f"{vs:+.3f}",
+                f"{csent.get('positive_pct', 0)}%",
+                f"{csent.get('negative_pct', 0)}%",
+                f"{csent.get('neutral_pct', 0)}%",
+            ]
+            for j, (val, w) in enumerate(zip(vals, col_w)):
+                pdf.set_text_color(r2, g2, b2) if j == 3 else pdf.set_text_color(13, 17, 23)
+                pdf.cell(w, 6, val, fill=fill, border=1,
+                         new_x=XPos.RIGHT, new_y=YPos.TOP)
+            pdf.ln(6)
+
+        pdf.ln(6)
+
+        # Per-company detail cards
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.set_text_color(13, 17, 23)
+        pdf.cell(0, 7, "INDIVIDUAL COMPANY SUMMARIES",
+                 new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.set_draw_color(88, 166, 255)
+        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+        pdf.ln(4)
+
+        for cticker, cdata in all_companies.items():
+            cstock = cdata.get("stock", {})
+            csent  = cdata.get("sentiment", {})
+            vs     = csent.get("vibe_score", 0)
+            r2, g2, b2 = _score_to_rgb(vs)
+
+            # Company sub-header
+            pdf.set_font("Helvetica", "B", 10)
+            pdf.set_text_color(13, 17, 23)
+            pdf.cell(0, 7,
+                     f"{cstock.get('company_name', cticker)} ({cticker})  "
+                     f"·  {cstock.get('sector', 'N/A')}",
+                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+            # Vibe score banner
+            pdf.set_fill_color(r2, g2, b2)
+            pdf.set_text_color(255, 255, 255)
+            pdf.set_font("Helvetica", "B", 11)
+            pdf.cell(0, 9,
+                     f"  Vibe Score: {vs:+.2f}  |  {csent.get('tone', 'N/A').title()}",
+                     fill=True, align="L",
+                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            pdf.ln(2)
+
+            # Stock + sentiment detail line
+            cprice  = cstock.get("price", 0)
+            chg_pct = cstock.get("change_pct", 0)
+            arrow   = "+" if chg_pct >= 0 else ""
+            pdf.set_font("Helvetica", "", 8)
+            pdf.set_text_color(80, 80, 80)
+            pdf.cell(0, 5,
+                     f"Price: ${cprice:,.2f} ({arrow}{chg_pct:.2f}%)   "
+                     f"Mkt Cap: {cstock.get('market_cap', 'N/A')}   "
+                     f"P/E: {cstock.get('pe_ratio', 'N/A')}",
+                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            pdf.cell(0, 5,
+                     f"Positive: {csent.get('positive_pct', 0)}%   "
+                     f"Negative: {csent.get('negative_pct', 0)}%   "
+                     f"Neutral: {csent.get('neutral_pct', 0)}%   "
+                     f"Segments analysed: {csent.get('chunk_count', 0)}",
+                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+            # Summary (stripped markdown)
+            summary_c = re.sub(r"\*\*(.+?)\*\*", r"\1", csent.get("summary", ""))
+            summary_c = re.sub(r"[🟢🔴⚪]", "", summary_c).strip()
+            summary_c = summary_c.encode("latin-1", errors="replace").decode("latin-1")
+            if summary_c:
+                pdf.set_font("Helvetica", "", 8)
+                pdf.set_text_color(40, 40, 40)
+                pdf.multi_cell(0, 4, summary_c[:400])  # cap length
+
+            pdf.ln(6)
+
     # ── Footer ────────────────────────────────────────────────────────────────
     pdf.set_font("Helvetica", "I", 7)
     pdf.set_text_color(139, 148, 158)
@@ -645,3 +926,190 @@ def generate_pdf_report(
 
     return bytes(pdf.output())
 
+
+# ════════════════════════════════════════════════════════════════════════════
+# Forward-Looking Outlook Generator
+# ════════════════════════════════════════════════════════════════════════════
+
+def _run_news_sentiment(headlines: list) -> dict:
+    """Run FinBERT on up to 8 news headlines; return aggregate sentiment dict."""
+    if not headlines or not HF_TOKEN:
+        return {"score": 0.0, "positive": 0, "negative": 0, "neutral": 0, "total": 0}
+
+    hf_headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
+    label_counts  = {"positive": 0, "negative": 0, "neutral": 0}
+    weighted_score = 0.0
+    processed      = 0
+
+    for headline in headlines[:8]:
+        if not headline.strip():
+            continue
+        try:
+            payload = {"inputs": headline, "parameters": {"truncation": True}}
+            resp    = requests.post(HF_API_URL, headers=hf_headers, json=payload, timeout=30)
+            if resp.status_code != 200:
+                continue
+            raw     = resp.json()
+            results = raw[0] if isinstance(raw, list) and isinstance(raw[0], list) else raw
+            top     = max(results, key=lambda r: r["score"])
+            label   = top["label"].lower()
+            conf    = top["score"]
+            label_counts[label] = label_counts.get(label, 0) + 1
+            weighted_score     += _label_to_score(label, conf)
+            processed          += 1
+        except Exception:
+            continue
+
+    if processed == 0:
+        return {"score": 0.0, "positive": 0, "negative": 0, "neutral": 0, "total": 0}
+
+    return {
+        "score":    round(weighted_score / processed, 4),
+        "positive": label_counts["positive"],
+        "negative": label_counts["negative"],
+        "neutral":  label_counts["neutral"],
+        "total":    processed,
+    }
+
+
+def generate_outlook(
+    ticker: str,
+    sentiment: dict,
+    history: list,
+    news_items: list,
+) -> dict:
+    """
+    Generate a forward-looking outlook by combining:
+      - Current FinBERT earnings-call sentiment (weight 40 %)
+      - Quarter-over-quarter sentiment trend     (weight 30 %)
+      - Recent news headline sentiment           (weight 30 %)
+
+    Returns:
+        signal          : "bullish" | "neutral" | "bearish"
+        confidence      : float 0-1
+        composite_score : float -1 to +1
+        summary         : narrative string (markdown)
+        signals         : list of contributing-signal dicts
+        news_sentiment  : raw news sentiment dict
+    """
+    score = sentiment["vibe_score"]
+    tone  = sentiment["tone"]
+
+    # ── Signal 1 : Earnings call FinBERT score ──────────────────────────────
+    s1     = score
+    s1_dir = "bullish" if score >= 0.25 else ("bearish" if score < -0.1 else "neutral")
+
+    # ── Signal 2 : Q/Q trend ────────────────────────────────────────────────
+    trend        = 0.0
+    trend_label  = "Insufficient data"
+    trend_clipped = 0.0
+    if len(history) >= 2:
+        trend         = history[0]["vibe_score"] - history[1]["vibe_score"]
+        trend_clipped = min(max(trend * 2, -1), 1)
+        if trend > 0.1:
+            trend_label = f"Improving (+{trend:.2f} vs prior quarter)"
+        elif trend < -0.1:
+            trend_label = f"Declining ({trend:+.2f} vs prior quarter)"
+        else:
+            trend_label = f"Stable ({trend:+.2f} vs prior quarter)"
+    s2     = trend_clipped
+    s2_dir = "bullish" if s2 > 0.1 else ("bearish" if s2 < -0.1 else "neutral")
+
+    # ── Signal 3 : News sentiment ────────────────────────────────────────────
+    headlines  = [n["title"] for n in news_items if n.get("title")]
+    news_sent  = _run_news_sentiment(headlines)
+    s3         = news_sent["score"]
+    s3_dir     = "bullish" if s3 >= 0.1 else ("bearish" if s3 < -0.05 else "neutral")
+
+    # ── Composite ────────────────────────────────────────────────────────────
+    composite = s1 * 0.40 + s2 * 0.30 + s3 * 0.30
+
+    if composite >= 0.20:
+        overall    = "bullish"
+        confidence = min(0.50 + composite * 0.50, 0.95)
+    elif composite <= -0.10:
+        overall    = "bearish"
+        confidence = min(0.50 + abs(composite) * 0.50, 0.95)
+    else:
+        overall    = "neutral"
+        confidence = 0.50
+
+    # ── Narrative ────────────────────────────────────────────────────────────
+    tone_map = {
+        "strongly optimistic": "strong optimism",
+        "moderately positive": "moderate confidence",
+        "broadly neutral":     "a measured, balanced stance",
+        "cautiously negative": "cautious concern",
+        "distinctly bearish":  "clearly bearish language",
+    }
+    tone_phrase = tone_map.get(tone, tone)
+
+    news_phrase = (
+        f"{news_sent['positive']} of {news_sent['total']} recent headlines carry a positive tone"
+        if news_sent["total"] > 0
+        else "limited news data was available"
+    )
+
+    trend_phrase = "The quarter-over-quarter sentiment trend"
+    if len(history) >= 2:
+        if trend > 0.1:
+            trend_phrase += f" is improving, up {trend:+.2f} points Q/Q."
+        elif trend < -0.1:
+            trend_phrase += f" is weakening, down {trend:+.2f} points Q/Q."
+        else:
+            trend_phrase += " remains broadly flat Q/Q."
+    else:
+        trend_phrase += " cannot yet be assessed (insufficient history)."
+
+    if overall == "bullish":
+        narrative = (
+            f"Combined signals point to a **bullish near-term outlook** for {ticker}. "
+            f"Management expressed {tone_phrase} in the latest earnings call, "
+            f"and {news_phrase}. {trend_phrase} "
+            f"Watch for continuation of positive guidance or upward estimate revisions as confirmation."
+        )
+    elif overall == "bearish":
+        narrative = (
+            f"Combined signals suggest a **cautious-to-bearish near-term outlook** for {ticker}. "
+            f"Management conveyed {tone_phrase} in the latest earnings release, "
+            f"and {news_phrase}. {trend_phrase} "
+            f"Monitor headwinds flagged in the filing and any management guidance updates before positioning."
+        )
+    else:
+        narrative = (
+            f"Combined signals indicate a **mixed or neutral near-term outlook** for {ticker}. "
+            f"Management adopted {tone_phrase} in the latest earnings call, "
+            f"and {news_phrase}. {trend_phrase} "
+            f"Clarity may emerge from upcoming macro releases or the next quarterly filing."
+        )
+
+    return {
+        "signal":          overall,
+        "confidence":      round(confidence, 3),
+        "composite_score": round(composite, 4),
+        "summary":         narrative,
+        "signals": [
+            {
+                "name":      "Earnings Call Tone",
+                "value":     f"{score:+.2f}",
+                "direction": s1_dir,
+                "weight":    "40%",
+                "detail":    tone.title(),
+            },
+            {
+                "name":      "Q/Q Sentiment Trend",
+                "value":     trend_label,
+                "direction": s2_dir,
+                "weight":    "30%",
+                "detail":    f"Based on {len(history)} quarters",
+            },
+            {
+                "name":      "Recent News Sentiment",
+                "value":     f"{s3:+.2f}",
+                "direction": s3_dir,
+                "weight":    "30%",
+                "detail":    f"{news_sent['total']} articles analysed",
+            },
+        ],
+        "news_sentiment": news_sent,
+    }
