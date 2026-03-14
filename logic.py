@@ -1235,10 +1235,11 @@ def build_pulse_user_prompt(
         pulse_score   = "N/A"
         pulse_label   = "N/A"
 
-    # ── Tag filing paragraphs [P1]–[P20] ────────────────────────────────────
-    paragraphs = [p.strip() for p in filing_text.split("\n\n") if p.strip()][:20]
+    # ── Tag filing paragraphs [P1]–[P10], cap each at 300 chars to save tokens ─
+    paragraphs = [p.strip() for p in filing_text.split("\n\n") if len(p.strip()) > 30][:10]
     tagged_paras = "\n\n".join(
-        f"[P{i+1}] {p}" for i, p in enumerate(paragraphs)
+        f"[P{i+1}] {p[:300]}{'…' if len(p) > 300 else ''}"
+        for i, p in enumerate(paragraphs)
     )
 
     return f"""=== PULSE AI CONTEXT FOR {ticker.upper()} ===
@@ -1285,7 +1286,7 @@ def call_pulse_llm(user_prompt: str) -> dict:
 
     from google.genai import types as genai_types
     response = client.models.generate_content(
-        model="gemini-1.5-flash",
+        model="gemini-2.0-flash-lite",
         config=genai_types.GenerateContentConfig(
             system_instruction=PULSE_SYSTEM_PROMPT,
         ),
