@@ -1353,13 +1353,15 @@ if st.session_state.sentiment and st.session_state.stock:
                     _err = str(e)
                     # Surface a short, friendly message for common API errors
                     if "429" in _err or "RESOURCE_EXHAUSTED" in _err:
-                        _msg = "⚠️ Gemini free-tier quota reached. Please wait a moment and try again."
+                        _msg = "⚠️ Gemini rate limit reached. Please wait ~1 minute and try again."
+                    elif "404" in _err or "NOT_FOUND" in _err:
+                        _msg = "⚠️ Gemini model not found. Check your API key project settings."
                     elif "API_KEY" in _err or "api_key" in _err.lower():
                         _msg = "⚠️ Gemini API key is missing or invalid. Check your .env file."
                     elif "JSON" in _err or "non-JSON" in _err:
                         _msg = "⚠️ Pulse received an unexpected response format. Please try again."
                     else:
-                        _msg = f"⚠️ Pulse encountered an error. Please try again."
+                        _msg = f"⚠️ Pulse encountered an error: {_err[:120]}"
                     st.session_state.chat_history.append(
                         {"role": "assistant", "content": _msg, "parsed": {}}
                     )
