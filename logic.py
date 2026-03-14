@@ -1286,7 +1286,7 @@ def call_pulse_llm(user_prompt: str) -> dict:
 
     from google.genai import types as genai_types
     response = client.models.generate_content(
-        model="gemini-2.0-flash-lite",
+        model="gemini-2.5-flash",
         config=genai_types.GenerateContentConfig(
             system_instruction=PULSE_SYSTEM_PROMPT,
         ),
