@@ -189,6 +189,7 @@ defaults = {
     "outlook":              None,   # forward-looking outlook dict
     "news_items":           [],     # [{title, publisher, link, published_date}]
     "_last_auto_check":     0.0,    # unix timestamp of last auto-check
+    "auto_run_ticker":      "",     # set by auto-trigger to invoke pipeline on next rerun
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -300,21 +301,35 @@ st.markdown("""
 
 # ── Primary analysis pipeline ─────────────────────────────────────────────────
 
-if run_button:
-    if not ticker_input:
+_auto_ticker = st.session_state.get("auto_run_ticker", "")
+_is_auto_run = bool(_auto_ticker) and not run_button
+
+if run_button or _auto_ticker:
+    # Determine which ticker to analyse (manual button vs auto-trigger)
+    _run_ticker = ticker_input if run_button else _auto_ticker
+    # Consume the auto-run flag immediately so it doesn't loop
+    if _is_auto_run:
+        st.session_state.auto_run_ticker = ""
+
+    if not _run_ticker:
         st.warning("Enter a ticker symbol in the sidebar before running analysis.")
     else:
         for k in ("stock", "sentiment", "meta", "transcript", "history", "keywords", "pdf_bytes"):
             st.session_state[k] = None
 
-        with st.status(f"🔍 Analysing **{ticker_input}**…", expanded=True, state="running") as status:
+        _status_label = (
+            f"🤖 Auto-analysing **{_run_ticker}** — new filing detected…"
+            if _is_auto_run
+            else f"🔍 Analysing **{_run_ticker}**…"
+        )
+        with st.status(_status_label, expanded=True, state="running") as status:
             try:
                 st.write("📈 Fetching stock market data…")
-                stock_data = fetch_stock_data(ticker_input)
+                stock_data = fetch_stock_data(_run_ticker)
                 st.write(f"✅ Stock data loaded — ${stock_data['price']:,.2f} ({stock_data['change_pct']:+.2f}%)")
 
                 st.write("📡 Connecting to SEC EDGAR…")
-                filing = fetch_transcript(ticker_input)
+                filing = fetch_transcript(_run_ticker)
                 st.write(f"✅ Filing retrieved: **{filing['title']}**")
 
                 st.write("🤖 Running FinBERT sentiment model on current quarter…")
@@ -325,15 +340,15 @@ if run_button:
                 keywords = get_keyword_insights(filing["text"])
 
                 st.write("📊 Fetching and analysing last 4 quarters…")
-                history = analyze_quarters(ticker_input, n=4)
+                history = analyze_quarters(_run_ticker, n=4)
                 st.write(f"✅ Historical analysis complete — {len(history)} quarters processed")
 
                 st.write("📰 Fetching recent news…")
-                news_items = fetch_recent_news(ticker_input)
+                news_items = fetch_recent_news(_run_ticker)
                 st.write(f"✅ {len(news_items)} recent articles found")
 
                 st.write("🔮 Generating forward-looking outlook…")
-                outlook = generate_outlook(ticker_input, sentiment, history, news_items)
+                outlook = generate_outlook(_run_ticker, sentiment, history, news_items)
                 st.write(
                     f"✅ Outlook: **{outlook['signal'].title()}** "
                     f"(composite {outlook['composite_score']:+.2f})"
@@ -348,20 +363,20 @@ if run_button:
                 st.session_state.keywords       = keywords
                 st.session_state.news_items     = news_items
                 st.session_state.outlook        = outlook
-                st.session_state.primary_ticker = ticker_input
+                st.session_state.primary_ticker = _run_ticker
 
                 # Store accession number for new-filing change-detection
                 acc = filing.get("acc", "")
                 if acc:
                     st.session_state.last_acc = {
                         **st.session_state.last_acc,
-                        ticker_input: acc,
+                        _run_ticker: acc,
                     }
 
                 st.write("📄 Generating PDF report…")
                 try:
                     pdf_bytes = generate_pdf_report(
-                        ticker_input, stock_data, sentiment, history,
+                        _run_ticker, stock_data, sentiment, history,
                         compare_data=st.session_state.compare or None,
                     )
                     st.session_state.pdf_bytes = pdf_bytes
@@ -370,10 +385,12 @@ if run_button:
                     st.session_state.pdf_bytes = None
                     st.write(f"⚠️ PDF generation skipped: {str(pdf_err)[:120]}")
 
-                status.update(
-                    label=f"✅ Analysis complete for **{ticker_input}**",
-                    state="complete", expanded=False
+                _complete_label = (
+                    f"✅ Auto-analysis complete for **{_run_ticker}** — new filing processed"
+                    if _is_auto_run
+                    else f"✅ Analysis complete for **{_run_ticker}**"
                 )
+                status.update(label=_complete_label, state="complete", expanded=False)
             except Exception as err:
                 status.update(label="❌ Analysis failed", state="error", expanded=True)
                 st.error(str(err))
@@ -445,7 +462,11 @@ if (
                 "ticker": ticker_input,
                 "acc":    result["acc"],
                 "date":   result["date"],
+                "auto":   True,
             }
+            # Automatically re-run the full analysis pipeline for the new filing
+            st.session_state.auto_run_ticker = ticker_input
+            st.rerun()
 
 # ── New-filing notification banner ────────────────────────────────────────────
 
@@ -453,10 +474,14 @@ if st.session_state.new_filing_banner:
     b = st.session_state.new_filing_banner
     col_banner, col_dismiss = st.columns([5, 1])
     with col_banner:
-        st.info(
-            f"📣 **New 8-K filing detected for {b['ticker']}** (filed {b['date']}) — "
+        _banner_msg = (
+            f"🤖 **New 8-K filing detected for {b['ticker']}** (filed {b['date']}) — "
+            "analysis has been automatically triggered and is running below."
+            if b.get("auto")
+            else f"📣 **New 8-K filing detected for {b['ticker']}** (filed {b['date']}) — "
             "a fresh earnings release is available. Run analysis to update your dashboard."
         )
+        st.info(_banner_msg)
     with col_dismiss:
         if st.button("Dismiss", key="dismiss_banner"):
             st.session_state.new_filing_banner = None
