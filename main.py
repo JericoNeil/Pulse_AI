@@ -1235,19 +1235,11 @@ if st.session_state.sentiment and st.session_state.stock:
 
 
     # ──────────────────────────────────────────────────────────────────────────
-    # TAB 7 — Ask Pulse (Gemini 1.5 Flash chatbot)
-    # ──────────────────────────────────────────────────────────────────────────
-    with tab7:
-        st.markdown("""
-        <h3 style="font-size:1.1rem;font-weight:600;color:#e6edf3;margin-bottom:4px">
-          🤖 Ask Pulse
-        </h3>
-        <p style="color:#8b949e;font-size:.82rem;margin-top:0;margin-bottom:16px">
-          Ask any question about this company's earnings. Pulse answers using only
-          the filing text, sentiment data, and market context loaded above.
-        </p>""", unsafe_allow_html=True)
-
-        # ── Suggested questions ────────────────────────────────────────────────
+    # TAB 7 — Ask Pulse (Gemini chatbot)
+    # ── Fragment keeps the chat UI isolated so button/input events never
+    #    trigger a full-page rerun that resets the active tab. ──────────────
+    @st.fragment
+    def _pulse_chat():
         suggested = [
             "Why is sentiment lower this quarter?",
             "How does this quarter compare to the last 4?",
@@ -1255,29 +1247,30 @@ if st.session_state.sentiment and st.session_state.stock:
             "What risks did management highlight?",
         ]
 
+        # ── Suggested questions ────────────────────────────────────────────
         st.markdown(
-            "<p style='font-size:.78rem;color:#484f58;margin-bottom:6px'>💡 Suggested questions</p>",
+            "<p style='font-size:.78rem;color:#484f58;margin-bottom:6px'>"
+            "💡 Suggested questions</p>",
             unsafe_allow_html=True,
         )
         cols_s = st.columns(len(suggested))
         for col, q in zip(cols_s, suggested):
             if col.button(q, key=f"suggest_{q[:20]}", use_container_width=True):
                 st.session_state["_pulse_prefill"] = q
+                st.rerun(scope="fragment")   # only reruns the fragment → tab stays
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # ── Chat history display ───────────────────────────────────────────────
+        # ── Chat history display ───────────────────────────────────────────
         for msg in st.session_state.chat_history:
             with st.chat_message(msg["role"]):
                 if msg["role"] == "user":
                     st.markdown(msg["content"])
                 else:
-                    # Render structured assistant response
-                    parsed = msg.get("parsed", {})
+                    parsed  = msg.get("parsed", {})
                     summary = parsed.get("short_summary", msg["content"])
                     drivers = parsed.get("drivers", [])
                     refs    = parsed.get("data_references", [])
-
                     st.markdown(
                         f"<div style='color:#e6edf3;font-size:.9rem'>{summary}</div>",
                         unsafe_allow_html=True,
@@ -1307,32 +1300,31 @@ if st.session_state.sentiment and st.session_state.stock:
                                 unsafe_allow_html=True,
                             )
 
-        # ── Chat input ─────────────────────────────────────────────────────────
+        # ── Chat input ─────────────────────────────────────────────────────
         prefill = st.session_state.pop("_pulse_prefill", "")
         user_q  = st.chat_input(
             "Ask about this company's earnings…",
             key="pulse_chat_input",
         )
-        # Accept either typed input or a suggested-question button press
         active_q = user_q or prefill
 
         if active_q:
-            # Append user message
             st.session_state.chat_history.append(
                 {"role": "user", "content": active_q}
             )
+            with st.chat_message("user"):
+                st.markdown(active_q)
 
-            # Build context from session state
-            _ticker   = st.session_state.primary_ticker
-            _stock    = st.session_state.stock         or {}
-            _sent     = st.session_state.sentiment     or {}
-            _hist     = st.session_state.history       or []
-            _outlook  = st.session_state.outlook
-            _filing   = st.session_state.transcript    or ""
+            _ticker  = st.session_state.primary_ticker
+            _stock   = st.session_state.stock      or {}
+            _sent    = st.session_state.sentiment  or {}
+            _hist    = st.session_state.history    or []
+            _outlook = st.session_state.outlook
+            _filing  = st.session_state.transcript or ""
 
             with st.spinner("Pulse is thinking…"):
                 try:
-                    prompt  = build_pulse_user_prompt(
+                    prompt = build_pulse_user_prompt(
                         ticker        = _ticker,
                         stock         = _stock,
                         sentiment     = _sent,
@@ -1342,16 +1334,45 @@ if st.session_state.sentiment and st.session_state.stock:
                         user_question = active_q,
                     )
                     result = call_pulse_llm(prompt)
-                    st.session_state.chat_history.append(
-                        {
-                            "role":    "assistant",
-                            "content": result.get("short_summary", ""),
-                            "parsed":  result,
-                        }
-                    )
+                    st.session_state.chat_history.append({
+                        "role":    "assistant",
+                        "content": result.get("short_summary", ""),
+                        "parsed":  result,
+                    })
+                    with st.chat_message("assistant"):
+                        _summary = result.get("short_summary", "")
+                        _drivers = result.get("drivers", [])
+                        _refs    = result.get("data_references", [])
+                        st.markdown(
+                            f"<div style='color:#e6edf3;font-size:.9rem'>{_summary}</div>",
+                            unsafe_allow_html=True,
+                        )
+                        if _drivers:
+                            st.markdown(
+                                "<p style='color:#8b949e;font-size:.78rem;"
+                                "font-weight:600;margin:10px 0 4px'>Key Drivers</p>",
+                                unsafe_allow_html=True,
+                            )
+                            for _d in _drivers:
+                                st.markdown(
+                                    f"<div style='font-size:.82rem;color:#c9d1d9;"
+                                    f"margin-bottom:3px'>• {_d}</div>",
+                                    unsafe_allow_html=True,
+                                )
+                        if _refs:
+                            st.markdown(
+                                "<p style='color:#8b949e;font-size:.78rem;"
+                                "font-weight:600;margin:10px 0 4px'>Data References</p>",
+                                unsafe_allow_html=True,
+                            )
+                            for _r in _refs:
+                                st.markdown(
+                                    f"<div style='font-size:.78rem;color:#484f58;"
+                                    f"font-family:monospace;margin-bottom:2px'>{_r}</div>",
+                                    unsafe_allow_html=True,
+                                )
                 except Exception as e:
                     _err = str(e)
-                    # Surface a short, friendly message for common API errors
                     if "429" in _err or "RESOURCE_EXHAUSTED" in _err:
                         _msg = "⚠️ Gemini rate limit reached. Please wait ~1 minute and try again."
                     elif "404" in _err or "NOT_FOUND" in _err:
@@ -1365,14 +1386,25 @@ if st.session_state.sentiment and st.session_state.stock:
                     st.session_state.chat_history.append(
                         {"role": "assistant", "content": _msg, "parsed": {}}
                     )
+                    with st.chat_message("assistant"):
+                        st.markdown(_msg)
 
-            st.rerun()
-
-        # ── Clear chat button ──────────────────────────────────────────────────
+        # ── Clear chat button ──────────────────────────────────────────────
         if st.session_state.chat_history:
             if st.button("🗑️ Clear chat", key="clear_pulse_chat"):
                 st.session_state.chat_history = []
-                st.rerun()
+                st.rerun(scope="fragment")
+
+    with tab7:
+        st.markdown("""
+        <h3 style="font-size:1.1rem;font-weight:600;color:#e6edf3;margin-bottom:4px">
+          🤖 Ask Pulse
+        </h3>
+        <p style="color:#8b949e;font-size:.82rem;margin-top:0;margin-bottom:16px">
+          Ask any question about this company's earnings. Pulse answers using only
+          the filing text, sentiment data, and market context loaded above.
+        </p>""", unsafe_allow_html=True)
+        _pulse_chat()
 
 
 # ── Empty state ───────────────────────────────────────────────────────────────
