@@ -141,9 +141,17 @@ def _download_exhibit(cik_int: int, acc_nodash: str, filename: str) -> str:
 
 def fetch_last_n_filings(ticker: str, n: int = 4) -> list:
     """
-    Fetch the last *n* 8-K earnings releases for *ticker* from SEC EDGAR.
+    Fetch the last *n* 8-K **earnings releases** for *ticker* from SEC EDGAR.
 
-    Returns a list of dicts: [{title, text, date, quarter}, ...]
+    Only considers 8-Ks that:
+      1. Are filed under Item 2.02 (Results of Operations) — the earnings item, OR
+         have no items metadata (older filings) but still contain an EX-99.1 exhibit.
+      2. Contain an EX-99.1 press-release exhibit with meaningful text (≥200 words).
+
+    This prevents non-earnings 8-Ks (director changes, agreements, etc.) from being
+    picked up and yielding misleadingly short transcripts.
+
+    Returns a list of dicts: [{title, text, date, quarter, acc}, ...]
     ordered most-recent first.
     """
     ticker  = ticker.upper()
@@ -158,19 +166,38 @@ def fetch_last_n_filings(ticker: str, n: int = 4) -> list:
     forms = recent["form"]
     dates = recent["filingDate"]
     accs  = recent["accessionNumber"]
+    # 'items' field lists the 8-K item numbers, e.g. "2.02" for earnings releases.
+    # Not always present in older filings — default to empty string.
+    items_list = recent.get("items", [""] * len(forms))
 
-    filings = []
-    for form, date, acc in zip(forms, dates, accs):
-        if form == "8-K":
-            filings.append({"date": date, "acc": acc})
-        if len(filings) >= n:
+    # Collect candidate 8-K filings, preferring Item 2.02 (earnings) ones.
+    # We gather up to n*6 candidates to give ourselves enough to find n valid ones.
+    candidates = []
+    for form, date, acc, items in zip(forms, dates, accs, items_list):
+        if form != "8-K":
+            continue
+        # items may be a comma-separated string like "2.02,9.01" or just "2.02"
+        item_nums = [i.strip() for i in str(items).split(",")]
+        is_earnings = "2.02" in item_nums
+        candidates.append({"date": date, "acc": acc, "is_earnings": is_earnings})
+        if len(candidates) >= n * 6:
             break
 
-    if not filings:
+    if not candidates:
         raise RuntimeError(f"No 8-K filings found for '{ticker}' on SEC EDGAR.")
 
+    # Sort: earnings releases (2.02) first, then everything else — preserving
+    # date order within each group so we still get most-recent first.
+    earnings_filings = [c for c in candidates if c["is_earnings"]]
+    other_filings    = [c for c in candidates if not c["is_earnings"]]
+    ordered = earnings_filings + other_filings
+
     results = []
-    for i, filing in enumerate(filings):
+    result_index = 0
+    for filing in ordered:
+        if len(results) >= n:
+            break
+
         acc_dashes = filing["acc"]
         acc_nodash = acc_dashes.replace("-", "")
         date       = filing["date"]
@@ -186,33 +213,31 @@ def fetch_last_n_filings(ticker: str, n: int = 4) -> list:
 
             exhibit_filename = _find_exhibit_filename(sgml_text, "EX-99.1")
 
-            if exhibit_filename:
-                text = _download_exhibit(cik_int, acc_nodash, exhibit_filename)
-            else:
-                # Fallback: try to extract inline from SGML
-                fnames = re.findall(r"<FILENAME>(.+\.htm)", sgml_text)
-                if fnames:
-                    text = _download_exhibit(cik_int, acc_nodash, fnames[0].strip())
-                else:
-                    text = _parse_exhibit_text(sgml_text, "")
-
-            if len(text.split()) < 80:
+            # Skip filings without an EX-99.1 — they are not earnings press releases
+            if not exhibit_filename:
                 continue
 
-            quarter_label = f"Q{i+1} Filing" if i > 0 else "Most Recent"
+            text = _download_exhibit(cik_int, acc_nodash, exhibit_filename)
+
+            # Require a minimum of 200 words — filters out stub/cover-page filings
+            if len(text.split()) < 200:
+                continue
+
+            quarter_label = "Most Recent" if result_index == 0 else f"Q-{result_index} Prior"
             results.append({
                 "title"  : f"{ticker} Earnings Release · {date}",
                 "text"   : text,
                 "date"   : date,
                 "quarter": quarter_label,
-                "acc"    : acc_dashes,  # accession number for change-detection
+                "acc"    : acc_dashes,
             })
+            result_index += 1
         except Exception:
             continue   # skip filings we can't parse
 
     if not results:
         raise RuntimeError(
-            f"Could not extract readable text from any of the last {n} 8-K filings for '{ticker}'."
+            f"Could not find any earnings press releases (8-K/EX-99.1) for '{ticker}' on SEC EDGAR."
         )
     return results
 
@@ -358,9 +383,13 @@ def fetch_recent_news(ticker: str, n: int = 8) -> list:
 
 def check_new_filing(ticker: str, last_acc: str = None) -> dict:
     """
-    Check SEC EDGAR for the latest 8-K for *ticker*.
+    Check SEC EDGAR for the latest earnings 8-K (Item 2.02) for *ticker*.
     Returns {is_new, acc, date, had_previous}.
-    is_new is True only when last_acc is given AND differs from the newest acc.
+    is_new is True only when last_acc is given AND differs from the newest earnings acc.
+
+    Only considers 8-Ks with Item 2.02 (Results of Operations) to avoid triggering
+    on non-earnings filings (director changes, agreements, etc.).
+    Falls back to any 8-K if no Item 2.02 is found.
     """
     try:
         cik = _get_cik(ticker.upper())
@@ -369,16 +398,34 @@ def check_new_filing(ticker: str, last_acc: str = None) -> dict:
         resp.raise_for_status()
         recent = resp.json()["filings"]["recent"]
 
-        for form, date, acc in zip(
-            recent["form"], recent["filingDate"], recent["accessionNumber"]
+        items_list = recent.get("items", [""] * len(recent["form"]))
+        first_8k = None  # fallback if no Item 2.02 found
+
+        for form, date, acc, items in zip(
+            recent["form"], recent["filingDate"], recent["accessionNumber"], items_list
         ):
-            if form == "8-K":
+            if form != "8-K":
+                continue
+            if first_8k is None:
+                first_8k = {"acc": acc, "date": date}
+            item_nums = [i.strip() for i in str(items).split(",")]
+            if "2.02" in item_nums:
+                # Found the most recent earnings release 8-K
                 return {
                     "is_new":        last_acc is not None and acc != last_acc,
                     "acc":           acc,
                     "date":          date,
                     "had_previous":  last_acc is not None,
                 }
+
+        # Fallback: use first 8-K found if no Item 2.02 available
+        if first_8k:
+            return {
+                "is_new":        last_acc is not None and first_8k["acc"] != last_acc,
+                "acc":           first_8k["acc"],
+                "date":          first_8k["date"],
+                "had_previous":  last_acc is not None,
+            }
         return {"is_new": False, "acc": None, "date": None, "had_previous": False}
     except Exception:
         return {"is_new": False, "acc": None, "date": None, "had_previous": False}
