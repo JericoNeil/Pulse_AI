@@ -5,4 +5,4 @@ python-dotenv
 yfinance
 plotly
 fpdf2
-google-generativeai
+google-genai
