@@ -10,6 +10,8 @@ import time
 
 from logic import (
     analyze_quarters,
+    build_pulse_user_prompt,
+    call_pulse_llm,
     check_new_filing,
     fetch_earnings_calendar,
     fetch_recent_news,
@@ -190,6 +192,7 @@ defaults = {
     "news_items":           [],     # [{title, publisher, link, published_date}]
     "_last_auto_check":     0.0,    # unix timestamp of last auto-check
     "auto_run_ticker":      "",     # set by auto-trigger to invoke pipeline on next rerun
+    "chat_history":         [],     # [{role, content, parsed}] for Ask Pulse chatbot
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -594,14 +597,15 @@ if st.session_state.sentiment and st.session_state.stock:
                 use_container_width=True,
             )
 
-    # ── 6 Tabs ────────────────────────────────────────────────────────────────
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    # ── 7 Tabs ────────────────────────────────────────────────────────────────
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "📊 Market Overview",
         "💬 Earnings Sentiment",
         "📈 Sentiment History",
         "🔄 Ticker Compare",
         "📄 Raw Filing",
         "🔮 What's Next",
+        "🤖 Ask Pulse",
     ])
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -1228,6 +1232,139 @@ if st.session_state.sentiment and st.session_state.stock:
                         {pub}&nbsp;·&nbsp;{date_s}
                       </div>
                     </div>""", unsafe_allow_html=True)
+
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # TAB 7 — Ask Pulse (Gemini 1.5 Flash chatbot)
+    # ──────────────────────────────────────────────────────────────────────────
+    with tab7:
+        st.markdown("""
+        <h3 style="font-size:1.1rem;font-weight:600;color:#e6edf3;margin-bottom:4px">
+          🤖 Ask Pulse
+        </h3>
+        <p style="color:#8b949e;font-size:.82rem;margin-top:0;margin-bottom:16px">
+          Ask any question about this company's earnings. Pulse answers using only
+          the filing text, sentiment data, and market context loaded above.
+        </p>""", unsafe_allow_html=True)
+
+        # ── Suggested questions ────────────────────────────────────────────────
+        suggested = [
+            "Why is sentiment lower this quarter?",
+            "How does this quarter compare to the last 4?",
+            "What are the key revenue drivers mentioned?",
+            "What risks did management highlight?",
+        ]
+
+        st.markdown(
+            "<p style='font-size:.78rem;color:#484f58;margin-bottom:6px'>💡 Suggested questions</p>",
+            unsafe_allow_html=True,
+        )
+        cols_s = st.columns(len(suggested))
+        for col, q in zip(cols_s, suggested):
+            if col.button(q, key=f"suggest_{q[:20]}", use_container_width=True):
+                st.session_state["_pulse_prefill"] = q
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # ── Chat history display ───────────────────────────────────────────────
+        for msg in st.session_state.chat_history:
+            with st.chat_message(msg["role"]):
+                if msg["role"] == "user":
+                    st.markdown(msg["content"])
+                else:
+                    # Render structured assistant response
+                    parsed = msg.get("parsed", {})
+                    summary = parsed.get("short_summary", msg["content"])
+                    drivers = parsed.get("drivers", [])
+                    refs    = parsed.get("data_references", [])
+
+                    st.markdown(
+                        f"<div style='color:#e6edf3;font-size:.9rem'>{summary}</div>",
+                        unsafe_allow_html=True,
+                    )
+                    if drivers:
+                        st.markdown(
+                            "<p style='color:#8b949e;font-size:.78rem;"
+                            "font-weight:600;margin:10px 0 4px'>Key Drivers</p>",
+                            unsafe_allow_html=True,
+                        )
+                        for d in drivers:
+                            st.markdown(
+                                f"<div style='font-size:.82rem;color:#c9d1d9;"
+                                f"margin-bottom:3px'>• {d}</div>",
+                                unsafe_allow_html=True,
+                            )
+                    if refs:
+                        st.markdown(
+                            "<p style='color:#8b949e;font-size:.78rem;"
+                            "font-weight:600;margin:10px 0 4px'>Data References</p>",
+                            unsafe_allow_html=True,
+                        )
+                        for r in refs:
+                            st.markdown(
+                                f"<div style='font-size:.78rem;color:#484f58;"
+                                f"font-family:monospace;margin-bottom:2px'>{r}</div>",
+                                unsafe_allow_html=True,
+                            )
+
+        # ── Chat input ─────────────────────────────────────────────────────────
+        prefill = st.session_state.pop("_pulse_prefill", "")
+        user_q  = st.chat_input(
+            "Ask about this company's earnings…",
+            key="pulse_chat_input",
+        )
+        # Accept either typed input or a suggested-question button press
+        active_q = user_q or prefill
+
+        if active_q:
+            # Append user message
+            st.session_state.chat_history.append(
+                {"role": "user", "content": active_q}
+            )
+
+            # Build context from session state
+            _ticker   = st.session_state.primary_ticker
+            _stock    = st.session_state.stock_data    or {}
+            _sent     = st.session_state.sentiment     or {}
+            _hist     = st.session_state.history       or []
+            _outlook  = st.session_state.outlook
+            _filing   = st.session_state.transcript    or ""
+
+            with st.spinner("Pulse is thinking…"):
+                try:
+                    prompt  = build_pulse_user_prompt(
+                        ticker        = _ticker,
+                        stock         = _stock,
+                        sentiment     = _sent,
+                        history       = _hist,
+                        outlook       = _outlook,
+                        filing_text   = _filing,
+                        user_question = active_q,
+                    )
+                    result = call_pulse_llm(prompt)
+                    st.session_state.chat_history.append(
+                        {
+                            "role":    "assistant",
+                            "content": result.get("short_summary", ""),
+                            "parsed":  result,
+                        }
+                    )
+                except Exception as e:
+                    st.session_state.chat_history.append(
+                        {
+                            "role":    "assistant",
+                            "content": f"⚠️ Pulse encountered an error: {e}",
+                            "parsed":  {},
+                        }
+                    )
+
+            st.rerun()
+
+        # ── Clear chat button ──────────────────────────────────────────────────
+        if st.session_state.chat_history:
+            if st.button("🗑️ Clear chat", key="clear_pulse_chat"):
+                st.session_state.chat_history = []
+                st.rerun()
 
 
 # ── Empty state ───────────────────────────────────────────────────────────────
