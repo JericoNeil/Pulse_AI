@@ -864,8 +864,15 @@ def generate_pdf_report(
         pdf.line(10, pdf.get_y(), 200, pdf.get_y())
         pdf.ln(5)
 
-        # Comparison summary table — widths must sum to 190 (A4 content width)
-        col_w   = [18, 47, 33, 26, 22, 22, 22]
+        # Comparison summary table — compute widths dynamically from actual page width
+        # so they always fit regardless of margin settings.
+        # Use thin line width for cell borders to avoid the right border bleeding past margin.
+        pdf.set_line_width(0.2)
+        _eff_w = int(pdf.epw)   # effective page width (page width minus both margins)
+        _props  = [10, 27, 19, 14, 11, 11, 11]   # relative column proportions
+        _sum_p  = sum(_props)
+        col_w   = [int(_eff_w * p / _sum_p) for p in _props]
+        col_w[-1] = _eff_w - sum(col_w[:-1])   # last col absorbs any rounding remainder
         headers = ["Ticker", "Company", "Price", "Vibe Score", "Pos %", "Neg %", "Neu %"]
 
         pdf.set_fill_color(22, 27, 34)
@@ -903,6 +910,7 @@ def generate_pdf_report(
             pdf.ln(6)
 
         pdf.ln(6)
+        pdf.set_line_width(0.6)   # restore thick line for section dividers below
 
         # Per-company detail cards
         pdf.set_font("Helvetica", "B", 10)
