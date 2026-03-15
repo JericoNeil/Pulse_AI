@@ -1339,11 +1339,10 @@ if st.session_state.sentiment and st.session_state.stock:
         active_q = user_q or prefill
 
         if active_q:
+            # Append user message to history immediately
             st.session_state.chat_history.append(
                 {"role": "user", "content": active_q}
             )
-            with st.chat_message("user"):
-                st.markdown(active_q)
 
             _stock   = st.session_state.stock      or {}
             _sent    = st.session_state.sentiment  or {}
@@ -1380,38 +1379,6 @@ if st.session_state.sentiment and st.session_state.stock:
                         "content": result.get("short_summary", ""),
                         "parsed":  result,
                     })
-                    with st.chat_message("assistant"):
-                        _summary = result.get("short_summary", "")
-                        _drivers = result.get("drivers", [])
-                        _refs    = result.get("data_references", [])
-                        st.markdown(
-                            f"<div style='color:#e6edf3;font-size:.9rem'>{_summary}</div>",
-                            unsafe_allow_html=True,
-                        )
-                        if _drivers:
-                            st.markdown(
-                                "<p style='color:#8b949e;font-size:.78rem;"
-                                "font-weight:600;margin:10px 0 4px'>Key Drivers</p>",
-                                unsafe_allow_html=True,
-                            )
-                            for _d in _drivers:
-                                st.markdown(
-                                    f"<div style='font-size:.82rem;color:#c9d1d9;"
-                                    f"margin-bottom:3px'>• {_d}</div>",
-                                    unsafe_allow_html=True,
-                                )
-                        if _refs:
-                            st.markdown(
-                                "<p style='color:#8b949e;font-size:.78rem;"
-                                "font-weight:600;margin:10px 0 4px'>Data References</p>",
-                                unsafe_allow_html=True,
-                            )
-                            for _r in _refs:
-                                st.markdown(
-                                    f"<div style='font-size:.78rem;color:#484f58;"
-                                    f"font-family:monospace;margin-bottom:2px'>{_r}</div>",
-                                    unsafe_allow_html=True,
-                                )
                 except Exception as e:
                     _err = str(e)
                     if "429" in _err or "RESOURCE_EXHAUSTED" in _err:
@@ -1427,8 +1394,9 @@ if st.session_state.sentiment and st.session_state.stock:
                     st.session_state.chat_history.append(
                         {"role": "assistant", "content": _msg, "parsed": {}}
                     )
-                    with st.chat_message("assistant"):
-                        st.markdown(_msg)
+
+            # Rerun fragment so history loop re-renders all messages ABOVE the input
+            st.rerun(scope="fragment")
 
         # ── Clear chat button ──────────────────────────────────────────────
         if st.session_state.chat_history:
