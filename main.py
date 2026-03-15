@@ -1240,12 +1240,27 @@ if st.session_state.sentiment and st.session_state.stock:
     #    trigger a full-page rerun that resets the active tab. ──────────────
     @st.fragment
     def _pulse_chat():
-        suggested = [
-            "Why is sentiment lower this quarter?",
-            "How does this quarter compare to the last 4?",
-            "What are the key revenue drivers mentioned?",
-            "What risks did management highlight?",
-        ]
+        # ── Resolve context ────────────────────────────────────────────────
+        _ticker   = st.session_state.primary_ticker or ""
+        _compare  = st.session_state.compare or {}   # {ticker: {stock, sentiment}}
+        _all_tickers = [_ticker] + list(_compare.keys()) if _ticker else list(_compare.keys())
+
+        # ── Dynamic suggested questions (cross-ticker when applicable) ─────
+        if _compare:
+            compare_label = " vs ".join([_ticker.upper()] + [t.upper() for t in _compare.keys()])
+            suggested = [
+                f"Compare sentiment of {compare_label}",
+                f"Which ticker has the strongest outlook?",
+                "What are the key revenue drivers mentioned?",
+                "What risks did management highlight?",
+            ]
+        else:
+            suggested = [
+                "Why is sentiment lower this quarter?",
+                "How does this quarter compare to the last 4?",
+                "What are the key revenue drivers mentioned?",
+                "What risks did management highlight?",
+            ]
 
         # ── Suggested questions ────────────────────────────────────────────
         st.markdown(
@@ -1258,6 +1273,20 @@ if st.session_state.sentiment and st.session_state.stock:
             if col.button(q, key=f"suggest_{q[:20]}", use_container_width=True):
                 st.session_state["_pulse_prefill"] = q
                 st.rerun(scope="fragment")   # only reruns the fragment → tab stays
+
+        # ── Active tickers badge ───────────────────────────────────────────
+        if _all_tickers:
+            badge_html = " &nbsp;".join(
+                f"<span style='background:#21262d;border:1px solid #30363d;"
+                f"border-radius:4px;padding:1px 6px;font-size:.75rem;"
+                f"color:#58a6ff;font-family:monospace'>{t.upper()}</span>"
+                for t in _all_tickers if t
+            )
+            st.markdown(
+                f"<p style='margin:4px 0 12px;font-size:.78rem;color:#8b949e'>"
+                f"Context: {badge_html}</p>",
+                unsafe_allow_html=True,
+            )
 
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -1302,10 +1331,11 @@ if st.session_state.sentiment and st.session_state.stock:
 
         # ── Chat input ─────────────────────────────────────────────────────
         prefill = st.session_state.pop("_pulse_prefill", "")
-        user_q  = st.chat_input(
-            "Ask about this company's earnings…",
-            key="pulse_chat_input",
+        _input_placeholder = (
+            f"Ask about {' / '.join(t.upper() for t in _all_tickers if t)}…"
+            if _all_tickers else "Load a ticker first to start chatting…"
         )
+        user_q  = st.chat_input(_input_placeholder, key="pulse_chat_input")
         active_q = user_q or prefill
 
         if active_q:
@@ -1315,12 +1345,21 @@ if st.session_state.sentiment and st.session_state.stock:
             with st.chat_message("user"):
                 st.markdown(active_q)
 
-            _ticker  = st.session_state.primary_ticker
             _stock   = st.session_state.stock      or {}
             _sent    = st.session_state.sentiment  or {}
             _hist    = st.session_state.history    or []
             _outlook = st.session_state.outlook
             _filing  = st.session_state.transcript or ""
+
+            # ── Fetch recent news for all loaded tickers ───────────────────
+            _news: dict = {}
+            try:
+                if _ticker:
+                    _news[_ticker] = fetch_recent_news(_ticker, n=5)
+                for _ct in _compare:
+                    _news[_ct] = fetch_recent_news(_ct, n=5)
+            except Exception:
+                pass   # news is optional — never block the chat on a fetch error
 
             with st.spinner("Pulse is thinking…"):
                 try:
@@ -1332,6 +1371,8 @@ if st.session_state.sentiment and st.session_state.stock:
                         outlook       = _outlook,
                         filing_text   = _filing,
                         user_question = active_q,
+                        compare_data  = _compare or None,
+                        news_items    = _news or None,
                     )
                     result = call_pulse_llm(prompt)
                     st.session_state.chat_history.append({
@@ -1396,13 +1437,19 @@ if st.session_state.sentiment and st.session_state.stock:
                 st.rerun(scope="fragment")
 
     with tab7:
-        st.markdown("""
+        _loaded_compare = st.session_state.compare or {}
+        _multi_note = (
+            f" Comparing: **{', '.join(k.upper() for k in _loaded_compare)}**."
+            if _loaded_compare else ""
+        )
+        st.markdown(f"""
         <h3 style="font-size:1.1rem;font-weight:600;color:#e6edf3;margin-bottom:4px">
           🤖 Ask Pulse
         </h3>
         <p style="color:#8b949e;font-size:.82rem;margin-top:0;margin-bottom:16px">
-          Ask any question about this company's earnings. Pulse answers using only
-          the filing text, sentiment data, and market context loaded above.
+          Ask any question about earnings, sentiment, market data, or recent news for
+          all loaded tickers. Pulse draws on filing excerpts, FinBERT scores, and
+          live Yahoo Finance headlines.{_multi_note}
         </p>""", unsafe_allow_html=True)
         _pulse_chat()
 
