@@ -864,8 +864,8 @@ def generate_pdf_report(
         pdf.line(10, pdf.get_y(), 200, pdf.get_y())
         pdf.ln(5)
 
-        # Comparison summary table
-        col_w   = [30, 50, 28, 34, 22, 22, 22]
+        # Comparison summary table — widths must sum to 190 (A4 content width)
+        col_w   = [18, 47, 33, 26, 22, 22, 22]
         headers = ["Ticker", "Company", "Price", "Vibe Score", "Pos %", "Neg %", "Neu %"]
 
         pdf.set_fill_color(22, 27, 34)
