@@ -1,8 +1,8 @@
-streamlit
-requests
-huggingface_hub
-python-dotenv
-yfinance
-plotly
-fpdf2
-google-genai
+streamlit>=1.50.0
+requests>=2.31.0
+huggingface_hub>=1.4.0
+python-dotenv>=1.0.0
+yfinance>=1.2.0
+plotly>=6.5.0
+fpdf2>=2.8.0
+google-genai>=1.47.0
