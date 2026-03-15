@@ -13,7 +13,7 @@ Assignment 1 delivered a working 5-tab sentiment dashboard. Assignment 2 signifi
 
 | Dimension | Assignment 1 | Assignment 2 |
 |-----------|-------------|-------------|
-| **Tabs** | 5 | 7 (+Earnings Calendar, +Ask Pulse) |
+| **Tabs** | 5 | 7 (+What's Next, +Ask Pulse) |
 | **Filings** | Latest only | Latest + 4-quarter history |
 | **Comparison** | Side-by-side vibe scores | Full PDF export with multi-company table |
 | **Automation** | Manual only | Auto-trigger on new SEC filings |
