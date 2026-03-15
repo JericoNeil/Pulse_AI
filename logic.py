@@ -864,8 +864,8 @@ def generate_pdf_report(
         pdf.line(10, pdf.get_y(), 200, pdf.get_y())
         pdf.ln(5)
 
-        # Comparison summary table
-        col_w   = [30, 50, 28, 34, 22, 22, 22]
+        # Comparison summary table — widths must sum to 190 (A4 content width)
+        col_w   = [18, 47, 33, 26, 22, 22, 22]
         headers = ["Ticker", "Company", "Price", "Vibe Score", "Pos %", "Neg %", "Neu %"]
 
         pdf.set_fill_color(22, 27, 34)
@@ -1192,25 +1192,52 @@ def build_pulse_user_prompt(
     outlook: Optional[dict],
     filing_text: str,
     user_question: str,
+    compare_data: Optional[dict] = None,
+    news_items: Optional[dict] = None,
 ) -> str:
-    """Build the structured context prompt sent to Gemini."""
+    """Build the structured context prompt sent to Gemini.
+
+    Args:
+        ticker: Primary ticker symbol.
+        stock: Stock market data dict (from fetch_stock_data).
+        sentiment: Sentiment dict (from run_sentiment_analysis) — uses vibe_score, positive_pct, etc.
+        history: List of quarterly sentiment dicts (from analyze_quarters).
+        outlook: Pulse outlook dict (from compute_pulse_outlook).
+        filing_text: Raw earnings filing text for the primary ticker.
+        user_question: The investor's question.
+        compare_data: Optional dict of {ticker: {stock, sentiment}} for compared tickers.
+        news_items: Optional dict of {ticker: [news_list]} from fetch_recent_news.
+    """
+
+    # ── Helper: normalise a pct value that may be stored as 55.3 or 0.553 ────
+    def _pct(v):
+        """Return value as 0-100 float. Handles both fraction and percent formats."""
+        if v is None:
+            return 0.0
+        v = float(v)
+        return v if v > 1 else v * 100
 
     # ── Sentiment history block ──────────────────────────────────────────────
     hist_lines = []
     for q in history:
+        q_label   = q.get("quarter_label") or q.get("quarter") or "?"
+        q_score   = q.get("vibe_score") if q.get("vibe_score") is not None else q.get("score", 0)
+        q_tone    = q.get("tone") or q.get("label") or "?"
+        q_pos     = _pct(q.get("positive_pct") if q.get("positive_pct") is not None else q.get("positive", 0))
+        q_neg     = _pct(q.get("negative_pct") if q.get("negative_pct") is not None else q.get("negative", 0))
+        q_neu     = _pct(q.get("neutral_pct") if q.get("neutral_pct") is not None else q.get("neutral", 0))
         hist_lines.append(
-            f"  {q.get('quarter','?')}: score={q.get('score', 0):+.2f}, "
-            f"label={q.get('label','?')}, positive={q.get('positive',0):.0%}, "
-            f"negative={q.get('negative',0):.0%}, neutral={q.get('neutral',0):.0%}"
+            f"  {q_label}: score={q_score:+.2f}, label={q_tone}, "
+            f"positive={q_pos:.0f}%, negative={q_neg:.0f}%, neutral={q_neu:.0f}%"
         )
     history_block = "\n".join(hist_lines) if hist_lines else "  (no history available)"
 
     # ── Most recent sentiment ────────────────────────────────────────────────
-    score    = sentiment.get("score", 0)
-    label    = sentiment.get("label", "unknown")
-    pos      = sentiment.get("positive", 0)
-    neg      = sentiment.get("negative", 0)
-    neu      = sentiment.get("neutral", 0)
+    score    = sentiment.get("vibe_score") if sentiment.get("vibe_score") is not None else sentiment.get("score", 0)
+    label    = sentiment.get("tone") or sentiment.get("label") or "unknown"
+    pos      = _pct(sentiment.get("positive_pct") if sentiment.get("positive_pct") is not None else sentiment.get("positive", 0))
+    neg      = _pct(sentiment.get("negative_pct") if sentiment.get("negative_pct") is not None else sentiment.get("negative", 0))
+    neu      = _pct(sentiment.get("neutral_pct") if sentiment.get("neutral_pct") is not None else sentiment.get("neutral", 0))
 
     # ── Stock data block ─────────────────────────────────────────────────────
     price    = stock.get("price", "N/A")
@@ -1242,11 +1269,51 @@ def build_pulse_user_prompt(
         for i, p in enumerate(paragraphs)
     )
 
+    # ── Compared tickers block ───────────────────────────────────────────────
+    if compare_data:
+        ct_lines = []
+        for ct, cd in compare_data.items():
+            cs = cd.get("sentiment") or {}
+            ck = cd.get("stock") or {}
+            ct_score  = cs.get("vibe_score") if cs.get("vibe_score") is not None else cs.get("score", 0)
+            ct_tone   = cs.get("tone") or cs.get("label") or "?"
+            ct_pos    = _pct(cs.get("positive_pct") if cs.get("positive_pct") is not None else cs.get("positive", 0))
+            ct_neg    = _pct(cs.get("negative_pct") if cs.get("negative_pct") is not None else cs.get("negative", 0))
+            ct_neu    = _pct(cs.get("neutral_pct") if cs.get("neutral_pct") is not None else cs.get("neutral", 0))
+            ct_price  = ck.get("price", "N/A")
+            ct_chg    = ck.get("change_pct", 0) or 0
+            ct_cap    = ck.get("market_cap", "N/A")
+            ct_pe     = ck.get("pe_ratio", "N/A")
+            ct_lines.append(
+                f"\n{ct.upper()}:\n"
+                f"  Sentiment: score={ct_score:+.2f}, label={ct_tone}, "
+                f"positive={ct_pos:.0f}%, negative={ct_neg:.0f}%, neutral={ct_neu:.0f}%\n"
+                f"  Market: price={ct_price} ({ct_chg:+.2f}% today), mktcap={ct_cap}, P/E={ct_pe}"
+            )
+        compare_block = "".join(ct_lines)
+    else:
+        compare_block = "  (no comparison tickers loaded — only primary ticker data available)"
+
+    # ── Recent news block ────────────────────────────────────────────────────
+    if news_items:
+        news_lines = []
+        for t, items in news_items.items():
+            if items:
+                news_lines.append(f"\n{t.upper()} recent headlines:")
+                for item in items:
+                    news_lines.append(
+                        f"  [{item.get('published_date', 'N/A')}] "
+                        f"{item.get('title', '')} — {item.get('publisher', '')}"
+                    )
+        news_block = "\n".join(news_lines) if news_lines else "  (no recent news available)"
+    else:
+        news_block = "  (no recent news available)"
+
     return f"""=== PULSE AI CONTEXT FOR {ticker.upper()} ===
 
 --- LATEST EARNINGS SENTIMENT ---
 Score : {score:+.2f}  |  Label: {label}
-Positive: {pos:.0%}  |  Negative: {neg:.0%}  |  Neutral: {neu:.0%}
+Positive: {pos:.0f}%  |  Negative: {neg:.0f}%  |  Neutral: {neu:.0f}%
 
 --- 4-QUARTER SENTIMENT HISTORY ---
 {history_block}
@@ -1265,6 +1332,12 @@ Signals:
 
 --- LATEST EARNINGS FILING EXCERPTS (tagged) ---
 {tagged_paras}
+
+--- COMPARED TICKERS ---
+{compare_block}
+
+--- RECENT NEWS HEADLINES ---
+{news_block}
 
 === INVESTOR QUESTION ===
 {user_question}"""
