@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Pulse AI (Streamlit)",
+      "runtimeExecutable": "streamlit",
+      "runtimeArgs": ["run", "main.py"],
+      "port": 8501
+    }
+  ]
+}
