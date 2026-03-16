@@ -52,12 +52,30 @@ def fetch_stock_data(ticker: str) -> dict:
         info = {}
 
     try:
+        fi = tk.fast_info
+    except Exception:
+        fi = None
+
+    try:
         hist = tk.history(period="3mo")
     except Exception:
         hist = None
 
-    price      = info.get("currentPrice") or info.get("regularMarketPrice", 0)
-    prev_close = info.get("previousClose", 0)
+    # Use fast_info as primary source for price (more reliable, less rate-limited)
+    # Fall back to info fields if fast_info is unavailable
+    if fi is not None:
+        price      = fi.last_price or info.get("currentPrice") or info.get("regularMarketPrice", 0)
+        prev_close = fi.previous_close or info.get("previousClose", 0)
+        mkt_cap    = fi.market_cap or info.get("marketCap")
+        wk52_high  = fi.year_high or info.get("fiftyTwoWeekHigh", "N/A")
+        wk52_low   = fi.year_low or info.get("fiftyTwoWeekLow", "N/A")
+    else:
+        price      = info.get("currentPrice") or info.get("regularMarketPrice", 0)
+        prev_close = info.get("previousClose", 0)
+        mkt_cap    = info.get("marketCap")
+        wk52_high  = info.get("fiftyTwoWeekHigh", "N/A")
+        wk52_low   = info.get("fiftyTwoWeekLow", "N/A")
+
     change     = round(price - prev_close, 2) if price and prev_close else 0
     change_pct = round((change / prev_close) * 100, 2) if prev_close else 0
 
@@ -81,10 +99,10 @@ def fetch_stock_data(ticker: str) -> dict:
         "change"       : change,
         "change_pct"   : change_pct,
         "prev_close"   : prev_close,
-        "market_cap"   : _fmt_large(info.get("marketCap")),
+        "market_cap"   : _fmt_large(mkt_cap),
         "pe_ratio"     : round(info.get("trailingPE", 0), 2) if info.get("trailingPE") else "N/A",
-        "week_52_high" : info.get("fiftyTwoWeekHigh", "N/A"),
-        "week_52_low"  : info.get("fiftyTwoWeekLow", "N/A"),
+        "week_52_high" : wk52_high,
+        "week_52_low"  : wk52_low,
         "volume"       : f"{info.get('volume', 0):,}" if info.get("volume") else "N/A",
         "avg_volume"   : f"{info.get('averageVolume', 0):,}" if info.get("averageVolume") else "N/A",
         "hist_df"      : hist,
